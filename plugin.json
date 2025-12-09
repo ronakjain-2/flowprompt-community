@@ -1,0 +1,19 @@
+{
+  "id": "nodebb-plugin-flowprompt-sso",
+  "name": "FlowPrompt SSO",
+  "description": "JWT-based SSO integration with FlowPrompt",
+  "url": "https://github.com/flowprompt/nodebb-plugin-flowprompt-sso",
+  "library": "./library.js",
+  "hooks": [
+    {
+      "hook": "static:app.load",
+      "method": "init"
+    }
+  ],
+  "staticDirs": {
+    "public": "./public"
+  },
+  "templates": "./templates",
+  "languages": "./languages"
+}
+

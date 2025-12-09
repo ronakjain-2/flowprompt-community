@@ -1,0 +1,31 @@
+{
+  "name": "nodebb-plugin-flowprompt-sso",
+  "version": "1.0.0",
+  "description": "SSO plugin for NodeBB using JWT tokens from FlowPrompt",
+  "main": "library.js",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "keywords": [
+    "nodebb",
+    "plugin",
+    "sso",
+    "jwt",
+    "oauth"
+  ],
+  "author": "FlowPrompt",
+  "license": "MIT",
+  "nbbpm": {
+    "compatibility": "^3.0.0"
+  },
+  "dependencies": {
+    "jsonwebtoken": "^9.0.2",
+    "node-fetch": "^3.3.2",
+    "jwks-rsa": "^3.1.0"
+  },
+  "peerDependencies": {
+    "nodebb-plugin-session-sharing": "*"
+  }
+}
+
