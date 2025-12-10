@@ -1,5 +1,3 @@
-'use strict';
-
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const fetch = require('node-fetch');
@@ -18,7 +16,7 @@ const Plugin = {
    * Plugin configuration (set via NodeBB Admin Panel)
    */
   config: {
-    flowpromptUrl: 'https://api.flowprompt.com',
+    flowpromptUrl: 'https://flowprompt.ai',
     publicKeyUrl: null, // Auto-set from flowpromptUrl
     jwksUrl: null, // Auto-set from flowpromptUrl
     publicKey: null, // Direct PEM key (alternative to JWKS)
@@ -43,7 +41,7 @@ const Plugin = {
   /**
    * Initialize plugin
    */
-  init: async function (params) {
+  async init(params) {
     const { router, middleware, controllers } = params;
     const self = Plugin;
 
@@ -62,17 +60,31 @@ const Plugin = {
     router.get('/sso/jwt', middleware.applyCSRF, self.handleSSO);
 
     // Register admin settings page
-    router.get('/admin/plugins/flowprompt-sso', middleware.admin.buildHeader, self.renderAdmin);
+    router.get(
+      '/admin/plugins/flowprompt-sso',
+      middleware.admin.buildHeader,
+      self.renderAdmin,
+    );
     router.get('/api/admin/plugins/flowprompt-sso', self.renderAdmin);
 
     // Register settings save endpoint
-    router.post('/api/admin/plugins/flowprompt-sso', middleware.admin.checkPrivileges, self.saveSettings);
+    router.post(
+      '/api/admin/plugins/flowprompt-sso',
+      middleware.admin.checkPrivileges,
+      self.saveSettings,
+    );
 
     // Log initialization
     console.log('[FlowPrompt SSO] Plugin initialized');
-    console.log(`[FlowPrompt SSO] FlowPrompt URL: ${self.config.flowpromptUrl}`);
-    console.log(`[FlowPrompt SSO] JWKS URL: ${self.config.jwksUrl || 'Not configured'}`);
-    console.log(`[FlowPrompt SSO] Public Key: ${self.config.publicKey ? 'Configured' : 'Not configured'}`);
+    console.log(
+      `[FlowPrompt SSO] FlowPrompt URL: ${self.config.flowpromptUrl}`,
+    );
+    console.log(
+      `[FlowPrompt SSO] JWKS URL: ${self.config.jwksUrl || 'Not configured'}`,
+    );
+    console.log(
+      `[FlowPrompt SSO] Public Key: ${self.config.publicKey ? 'Configured' : 'Not configured'}`,
+    );
 
     return self;
   },
@@ -80,7 +92,7 @@ const Plugin = {
   /**
    * Load configuration from NodeBB settings
    */
-  loadConfig: function () {
+  loadConfig() {
     const self = Plugin;
     const meta = require.main.require('./src/meta');
 
@@ -97,6 +109,7 @@ const Plugin = {
     if (self.config.flowpromptUrl && !self.config.publicKeyUrl) {
       self.config.publicKeyUrl = `${self.config.flowpromptUrl}/api/sso/public-key.pem`;
     }
+
     if (self.config.flowpromptUrl && !self.config.jwksUrl) {
       self.config.jwksUrl = `${self.config.flowpromptUrl}/.well-known/jwks.json`;
     }
@@ -105,7 +118,7 @@ const Plugin = {
   /**
    * Initialize nonce store
    */
-  initNonceStore: function () {
+  initNonceStore() {
     const self = Plugin;
     const db = require.main.require('./src/database');
 
@@ -114,26 +127,31 @@ const Plugin = {
       self.nonceStore = {
         async setNonce(nonce, ttl) {
           const key = `sso:nonce:${nonce}`;
+
           await db.setObject(key, { used: false, timestamp: Date.now() });
           await db.expire(key, ttl);
         },
         async consumeNonce(nonce) {
           const key = `sso:nonce:${nonce}`;
           const exists = await db.exists(key);
+
           if (exists) {
             await db.delete(key);
             return true;
           }
+
           return false;
         },
         async hasNonce(nonce) {
           const key = `sso:nonce:${nonce}`;
+
           return await db.exists(key);
         },
       };
     } else {
       // In-memory store (for development)
       const store = new Map();
+
       self.nonceStore = {
         async setNonce(nonce, ttl) {
           store.set(nonce, Date.now());
@@ -141,9 +159,11 @@ const Plugin = {
         },
         async consumeNonce(nonce) {
           const exists = store.has(nonce);
+
           if (exists) {
             store.delete(nonce);
           }
+
           return exists;
         },
         async hasNonce(nonce) {
@@ -156,8 +176,9 @@ const Plugin = {
   /**
    * Initialize JWKS client
    */
-  initJWKS: function () {
+  initJWKS() {
     const self = Plugin;
+
     self.jwksClient = jwksClient({
       jwksUri: self.config.jwksUrl,
       cache: true,
@@ -170,7 +191,7 @@ const Plugin = {
   /**
    * Get public key for JWT verification
    */
-  getPublicKey: async function (kid) {
+  async getPublicKey(kid) {
     const self = Plugin;
 
     // If direct public key is configured, use it
@@ -182,6 +203,7 @@ const Plugin = {
     if (self.jwksClient) {
       try {
         const key = await self.jwksClient.getSigningKey(kid);
+
         return key.getPublicKey();
       } catch (err) {
         console.error('[FlowPrompt SSO] Error fetching JWKS key:', err);
@@ -193,10 +215,13 @@ const Plugin = {
     if (self.config.publicKeyUrl) {
       try {
         const response = await fetch(self.config.publicKeyUrl);
+
         if (!response.ok) {
           throw new Error(`Failed to fetch public key: ${response.statusText}`);
         }
+
         const publicKey = await response.text();
+
         return publicKey;
       } catch (err) {
         console.error('[FlowPrompt SSO] Error fetching public key:', err);
@@ -210,17 +235,18 @@ const Plugin = {
   /**
    * Verify JWT token
    */
-  verifyToken: async function (token) {
+  async verifyToken(token) {
     const self = Plugin;
 
     try {
       // Decode token header to get kid
       const decoded = jwt.decode(token, { complete: true });
+
       if (!decoded || !decoded.header) {
         throw new Error('Invalid token format');
       }
 
-      const kid = decoded.header.kid;
+      const { kid } = decoded.header;
 
       // Get public key
       const publicKey = await self.getPublicKey(kid);
@@ -234,12 +260,14 @@ const Plugin = {
 
       // Check nonce (one-time use)
       const nonce = payload.jti || payload.nonce;
+
       if (!nonce) {
         throw new Error('Token missing nonce (jti)');
       }
 
       // Check if nonce was already used
       const wasUsed = await self.nonceStore.hasNonce(nonce);
+
       if (wasUsed) {
         throw new Error('Token already used (replay attack detected)');
       }
@@ -257,12 +285,13 @@ const Plugin = {
   /**
    * Find or create NodeBB user
    */
-  findOrCreateUser: async function (payload) {
+  async findOrCreateUser(payload) {
     const self = Plugin;
     const User = require.main.require('./src/user');
     const Groups = require.main.require('./src/groups');
 
-    const email = payload.email;
+    const { email } = payload;
+
     if (!email) {
       throw new Error('Token missing email claim');
     }
@@ -273,11 +302,16 @@ const Plugin = {
     if (uid) {
       // User exists - update profile if needed
       const updateData = {};
-      if (payload.name && payload.name !== await User.getUserField(uid, 'username')) {
+
+      if (
+        payload.name &&
+        payload.name !== (await User.getUserField(uid, 'username'))
+      ) {
         // Note: Username changes might require admin privileges
         // For now, just update fullname
         updateData.fullname = payload.name;
       }
+
       if (payload.picture) {
         updateData.picture = payload.picture;
       }
@@ -299,9 +333,9 @@ const Plugin = {
 
     // Create user
     uid = await User.create({
-      username: username,
-      email: email,
-      fullname: fullname,
+      username,
+      email,
+      fullname,
       picture: payload.picture || '',
     });
 
@@ -310,7 +344,10 @@ const Plugin = {
       try {
         await Groups.join(self.config.defaultGroup, uid);
       } catch (err) {
-        console.error('[FlowPrompt SSO] Error adding user to default group:', err);
+        console.error(
+          '[FlowPrompt SSO] Error adding user to default group:',
+          err,
+        );
       }
     }
 
@@ -321,7 +358,7 @@ const Plugin = {
   /**
    * Create NodeBB session
    */
-  createSession: async function (req, res, uid) {
+  async createSession(req, res, uid) {
     const self = Plugin;
     const User = require.main.require('./src/user');
 
@@ -355,12 +392,13 @@ const Plugin = {
    * Handle SSO request
    * GET /sso/jwt?token=<jwt>&redirect=<path>
    */
-  handleSSO: async function (req, res, next) {
+  async handleSSO(req, res, next) {
     const self = Plugin;
 
     try {
       // Get token from query parameter
-      const token = req.query.token;
+      const { token } = req.query;
+
       if (!token) {
         return res.status(400).render('500', {
           error: 'Missing token parameter',
@@ -380,10 +418,14 @@ const Plugin = {
       const redirectPath = payload.redirect || req.query.redirect || '/';
 
       // Validate redirect path (security: prevent open redirect)
-      const allowedHosts = (self.config.allowedRedirectHosts || '').split(',').filter(Boolean);
+      const allowedHosts = (self.config.allowedRedirectHosts || '')
+        .split(',')
+        .filter(Boolean);
+
       if (allowedHosts.length > 0 && !redirectPath.startsWith('/')) {
         try {
           const redirectUrl = new URL(redirectPath, `https://${req.hostname}`);
+
           if (!allowedHosts.includes(redirectUrl.hostname)) {
             throw new Error('Redirect host not allowed');
           }
@@ -411,8 +453,9 @@ const Plugin = {
   /**
    * Render admin settings page
    */
-  renderAdmin: async function (req, res, next) {
+  async renderAdmin(req, res, next) {
     const self = Plugin;
+
     res.render('admin/plugins/flowprompt-sso', {
       title: 'FlowPrompt SSO Settings',
       config: self.config,
@@ -422,7 +465,7 @@ const Plugin = {
   /**
    * Save admin settings
    */
-  saveSettings: async function (req, res, next) {
+  async saveSettings(req, res, next) {
     const self = Plugin;
     const meta = require.main.require('./src/meta');
 
@@ -445,6 +488,7 @@ const Plugin = {
     if (settings.nonceStore !== self.config.nonceStore) {
       self.initNonceStore();
     }
+
     if (settings.flowpromptUrl && !settings.publicKey) {
       self.initJWKS();
     }
@@ -454,4 +498,3 @@ const Plugin = {
 };
 
 module.exports = Plugin;
-

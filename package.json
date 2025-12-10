@@ -12,7 +12,8 @@
     "plugin",
     "sso",
     "jwt",
-    "oauth"
+    "oauth",
+    "nodebb-plugin"
   ],
   "author": "FlowPrompt",
   "license": "MIT",
@@ -28,4 +29,3 @@
     "nodebb-plugin-session-sharing": "*"
   }
 }
-
