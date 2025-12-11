@@ -365,12 +365,18 @@ const Plugin = {
   async createSession(req, res, uid) {
     const self = Plugin;
     const User = require.main.require('./src/user');
+    const db = require.main.require('./src/database');
+    const meta = require.main.require('./src/meta');
 
     // Regenerate session to prevent fixation attacks
     await new Promise((resolve, reject) => {
       req.session.regenerate((err) => {
-        if (err) reject(err);
-        else resolve();
+        if (err) {
+          console.error('[FlowPrompt SSO] Session regenerate error:', err);
+          reject(err);
+        } else {
+          resolve();
+        }
       });
     });
 
@@ -378,18 +384,49 @@ const Plugin = {
     req.session.uid = uid;
     req.session.jwt = true; // Mark as JWT-authenticated
 
-    // Save session
+    // Save session and wait for it to complete
     await new Promise((resolve, reject) => {
       req.session.save((err) => {
-        if (err) reject(err);
-        else resolve();
+        if (err) {
+          console.error('[FlowPrompt SSO] Session save error:', err);
+          reject(err);
+        } else {
+          resolve();
+        }
       });
     });
 
-    // Update user last login
+    // Update user last login time
     await User.updateLastOnlineTime(uid);
 
+    // Mark user as online
+    await db.sortedSetAdd('users:online', Date.now(), uid);
+
+    // Get NodeBB cookie configuration
+    const cookieName = meta.config.cookieName || 'express.sid';
+    const cookieSecure =
+      meta.config.cookieSecure === 'true' || req.protocol === 'https';
+    const cookieDomain = meta.config.cookieDomain || '';
+
+    // Explicitly set the session cookie with NodeBB's settings
+    const cookieOptions = {
+      httpOnly: true,
+      secure: cookieSecure,
+      sameSite: 'lax',
+      maxAge: 1000 * 60 * 60 * 24 * 14, // 14 days
+      path: '/',
+    };
+
+    if (cookieDomain) {
+      cookieOptions.domain = cookieDomain;
+    }
+
+    res.cookie(cookieName, req.sessionID, cookieOptions);
+
     console.log(`[FlowPrompt SSO] Created session for user: ${uid}`);
+    console.log(`[FlowPrompt SSO] Session ID: ${req.sessionID}`);
+    console.log(`[FlowPrompt SSO] Cookie name: ${cookieName}`);
+    console.log(`[FlowPrompt SSO] Cookie secure: ${cookieSecure}`);
   },
 
   /**
@@ -442,6 +479,14 @@ const Plugin = {
           }
         }
       }
+
+      // Log session details for debugging
+      console.log(`[FlowPrompt SSO] Redirecting to: ${redirectPath}`);
+      console.log(`[FlowPrompt SSO] Session UID: ${req.session.uid}`);
+      console.log(`[FlowPrompt SSO] Session ID: ${req.sessionID}`);
+
+      // Small delay to ensure cookie is set before redirect
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Redirect to forum
       return res.redirect(redirectPath);
