@@ -339,6 +339,17 @@ const Plugin = {
       picture: payload.picture || '',
     });
 
+    // Mark email as confirmed to avoid validation emails during SSO-created accounts
+    try {
+      await User.setUserFields(uid, {
+        'email:confirmed': 1,
+        'email:validationPending': 0,
+        'email:pending': 0,
+      });
+    } catch (err) {
+      console.error('[FlowPrompt SSO] Error marking email confirmed:', err);
+    }
+
     // Add to default group
     if (self.config.defaultGroup) {
       try {
