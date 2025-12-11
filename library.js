@@ -16,7 +16,7 @@ const Plugin = {
    * Plugin configuration (set via NodeBB Admin Panel)
    */
   config: {
-    flowpromptUrl: 'https://flowprompt.ai',
+    flowpromptUrl: 'https://api.flowprompt.ai',
     publicKeyUrl: null, // Auto-set from flowpromptUrl
     jwksUrl: null, // Auto-set from flowpromptUrl
     publicKey: null, // Direct PEM key (alternative to JWKS)
