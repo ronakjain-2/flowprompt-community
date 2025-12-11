@@ -337,18 +337,11 @@ const Plugin = {
       email,
       fullname,
       picture: payload.picture || '',
+      // Ensure NodeBB treats the email as confirmed to avoid validation email
+      'email:confirmed': 1,
+      'email:validationPending': 0,
+      'email:pending': 0,
     });
-
-    // Mark email as confirmed to avoid validation emails during SSO-created accounts
-    try {
-      await User.setUserFields(uid, {
-        'email:confirmed': 1,
-        'email:validationPending': 0,
-        'email:pending': 0,
-      });
-    } catch (err) {
-      console.error('[FlowPrompt SSO] Error marking email confirmed:', err);
-    }
 
     // Add to default group
     if (self.config.defaultGroup) {
