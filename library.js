@@ -56,8 +56,8 @@ const Plugin = {
       self.initJWKS();
     }
 
-    // Register SSO route
-    router.get('/sso/jwt', middleware.applyCSRF, self.handleSSO);
+    // Register SSO route (no CSRF required for this GET redirect flow)
+    router.get('/sso/jwt', self.handleSSO);
 
     // Register admin settings page
     router.get(
