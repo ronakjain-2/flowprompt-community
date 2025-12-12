@@ -64,9 +64,16 @@ const Plugin = {
     // CRITICAL: Add middleware to ensure user is loaded from session on all requests
     // NodeBB's authentication middleware should do this, but we ensure it happens
     // This must be registered BEFORE other routes so it runs on all requests
+    // Use a flag to prevent running multiple times per request
     router.use(async (req, res, next) => {
+      // Skip if already processed or if user is already loaded
+      if (req._flowpromptSSOProcessed || req.user) {
+        return next();
+      }
+
       // Only process if session has UID but req.user is not set
       if (req.session?.uid && !req.user) {
+        req._flowpromptSSOProcessed = true; // Mark as processed
         const User = require.main.require('./src/user');
         try {
           const userData = await User.getUserFields(req.session.uid, [
@@ -81,9 +88,13 @@ const Plugin = {
           if (userData) {
             req.user = userData;
             req.uid = req.session.uid;
-            console.log(
-              `[FlowPrompt SSO] Middleware: Loaded user ${req.session.uid} from session`,
-            );
+            // Only log once per request to reduce noise
+            if (!req._flowpromptSSOLogged) {
+              console.log(
+                `[FlowPrompt SSO] Middleware: Loaded user ${req.session.uid} from session`,
+              );
+              req._flowpromptSSOLogged = true;
+            }
           }
         } catch (err) {
           console.error(
@@ -412,6 +423,22 @@ const Plugin = {
       'email:pending': 0,
     });
 
+    // CRITICAL: Explicitly set the email after user creation
+    // NodeBB sometimes doesn't set the email properly during User.create()
+    // We need to use UserEmail.set() to ensure it's registered
+    try {
+      const UserEmail = require.main.require('./src/user/email');
+      await UserEmail.set(uid, email);
+      // Confirm the email immediately
+      await UserEmail.confirmByUid(uid);
+      console.log(
+        `[FlowPrompt SSO] Email ${email} set and confirmed for user ${uid}`,
+      );
+    } catch (err) {
+      console.error('[FlowPrompt SSO] Error setting email:', err);
+      // Continue anyway - user is created even if email setting fails
+    }
+
     // Add to default group
     if (self.config.defaultGroup) {
       try {
@@ -442,34 +469,44 @@ const Plugin = {
       console.log(
         `[FlowPrompt SSO] Clearing existing session for UID: ${req.session.uid}`,
       );
-    }
-
-    // CRITICAL: Regenerate session to prevent session fixation attacks
-    // and ensure a fresh session ID is created
-    // regenerate() automatically destroys the old session and creates a new one
-    // We don't need to destroy manually - regenerate handles it
-    await new Promise((resolve, reject) => {
-      // Check if regenerate method exists (it should always exist in express-session)
-      if (!req.session || typeof req.session.regenerate !== 'function') {
-        console.error(
-          '[FlowPrompt SSO] Session regenerate method not available',
+      // If user is already logged in with the same UID, don't regenerate
+      // This prevents session mismatch errors
+      if (req.session.uid === uid) {
+        console.log(
+          `[FlowPrompt SSO] User ${uid} already logged in, reusing existing session`,
         );
-        reject(new Error('Session regenerate method not available'));
-        return;
-      }
+        // Just update the session, don't regenerate
+        req.session.jwt = true;
+        // Continue to set user data below
+      } else {
+        // Different user - regenerate session
+        await new Promise((resolve, reject) => {
+          if (!req.session || typeof req.session.regenerate !== 'function') {
+            console.error(
+              '[FlowPrompt SSO] Session regenerate method not available',
+            );
+            reject(new Error('Session regenerate method not available'));
+            return;
+          }
 
-      req.session.regenerate((err) => {
-        if (err) {
-          console.error('[FlowPrompt SSO] Session regenerate error:', err);
-          reject(err);
-        } else {
-          console.log(
-            `[FlowPrompt SSO] Session regenerated with new ID: ${req.sessionID}`,
-          );
-          resolve();
-        }
-      });
-    });
+          req.session.regenerate((err) => {
+            if (err) {
+              console.error('[FlowPrompt SSO] Session regenerate error:', err);
+              reject(err);
+            } else {
+              console.log(
+                `[FlowPrompt SSO] Session regenerated with new ID: ${req.sessionID}`,
+              );
+              resolve();
+            }
+          });
+        });
+      }
+    } else {
+      // No existing session - create new one (but don't regenerate empty session)
+      // Just set the UID directly
+      console.log('[FlowPrompt SSO] No existing session, creating new one');
+    }
 
     // Set user session - this is the key to authentication in NodeBB
     // NodeBB checks req.session.uid to determine if user is logged in
