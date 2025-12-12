@@ -59,39 +59,7 @@ const Plugin = {
     // Register SSO route
     // Note: We skip CSRF for this GET redirect flow, but ensure session middleware runs
     // The session middleware should already be running globally, but we ensure it's active
-    // We also need to ensure NodeBB's authentication middleware runs after session is set
     router.get('/sso/jwt', middleware.maintenanceMode, self.handleSSO);
-
-    // Hook into NodeBB's response middleware to ensure user is loaded
-    // This ensures that after we set req.session.uid, NodeBB loads req.user
-    const hooks = require.main.require('./src/hooks');
-    hooks.on('response:router.page', async function (hookData) {
-      const { req, res } = hookData;
-
-      // If session has uid but req.user is not set, load the user
-      if (req.session && req.session.uid && !req.user) {
-        const User = require.main.require('./src/user');
-        try {
-          const userData = await User.getUserFields(req.session.uid, [
-            'uid',
-            'username',
-            'email',
-            'picture',
-          ]);
-          if (userData) {
-            req.user = userData;
-            req.uid = req.session.uid;
-            console.log(
-              `[FlowPrompt SSO] Hook: Loaded user ${req.session.uid} from session`,
-            );
-          }
-        } catch (err) {
-          console.error('[FlowPrompt SSO] Hook: Error loading user:', err);
-        }
-      }
-
-      return hookData;
-    });
 
     // Register admin settings page
     router.get(
