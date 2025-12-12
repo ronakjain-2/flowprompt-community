@@ -574,8 +574,31 @@ const Plugin = {
     // Mark user as online in NodeBB's sorted set
     await db.sortedSetAdd('users:online', Date.now(), uid);
 
-    // Get NodeBB cookie configuration
-    const cookieDomain = meta.config.cookieDomain || '';
+    // Get NodeBB cookie configuration with robust fallback
+    // Determine cookieDomain robustly: prefer NodeBB meta.config.cookieDomain, fallback to config.json.cookieDomain, else use empty string
+    let cookieDomain = null;
+    try {
+      if (meta && meta.config && meta.config.cookieDomain) {
+        cookieDomain = meta.config.cookieDomain;
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    if (!cookieDomain) {
+      // fallback to config.json read
+      try {
+        const config = require('/srv/nodebb/config.json');
+        if (config && config.cookieDomain) {
+          cookieDomain = config.cookieDomain;
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // final fallback - use empty string to match express-session default (no domain set)
+    if (!cookieDomain) cookieDomain = '';
 
     // Get cookie name from session store (express-session stores it here)
     const cookieName =
@@ -747,19 +770,45 @@ const Plugin = {
       // CRITICAL: Explicitly set cookies that NodeBB's client-side code expects
       // This prevents "login session no longer matches" errors
       // Use parent domain so cookies work across subdomains (app.flowprompt.ai -> community.flowprompt.ai)
-      const meta = require.main.require('./src/meta');
-      const cookieDomain = meta.config.cookieDomain || '.flowprompt.ai';
+
+      // Determine cookieDomain robustly: prefer NodeBB meta.config.cookieDomain, fallback to config.json.cookieDomain, else use parent domain
+      let cookieDomain = null;
+      try {
+        const meta = require.main.require('./src/meta');
+        if (meta && meta.config && meta.config.cookieDomain) {
+          cookieDomain = meta.config.cookieDomain;
+        }
+      } catch (e) {
+        // ignore
+      }
+
+      if (!cookieDomain) {
+        // fallback to config.json read
+        try {
+          const config = require('/srv/nodebb/config.json');
+          if (config && config.cookieDomain) {
+            cookieDomain = config.cookieDomain;
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      // final fallback
+      if (!cookieDomain) cookieDomain = '.flowprompt.ai';
+
       const isSecure =
         req.protocol === 'https' ||
         (req.get && req.get('X-Forwarded-Proto') === 'https') ||
         req.secure;
 
       // Base options for cross-site use
+      // Use SameSite=None for cross-subdomain SSO (app.flowprompt.ai -> community.flowprompt.ai)
       const baseOpts = {
         path: '/',
         domain: cookieDomain,
-        sameSite: 'Lax', // Use 'Lax' for same-site, 'None' only if truly cross-site
-        secure: !!isSecure,
+        sameSite: 'None', // Use 'None' for cross-subdomain SSO
+        secure: !!isSecure, // Required when SameSite=None
       };
 
       // UID cookie: readable client-side (NodeBB expects 'uid' cookie)
