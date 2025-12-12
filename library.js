@@ -61,6 +61,20 @@ const Plugin = {
     // The session middleware should already be running globally, but we ensure it's active
     router.get('/sso/jwt', middleware.maintenanceMode, self.handleSSO);
 
+    // Debug hook: log authentication middleware to confirm session is recognized
+    try {
+      const hooks = require.main.require('./src/plugins/hooks');
+      hooks.on('filter:middleware.authenticate', async (hookData) => {
+        const { req } = hookData;
+        console.log(
+          `[FlowPrompt SSO][auth hook] sid=${req.sessionID} uid=${req.session?.uid} user=${req.user?.uid}`,
+        );
+        return hookData;
+      });
+    } catch (err) {
+      console.error('[FlowPrompt SSO] Failed to attach auth hook:', err);
+    }
+
     // Register admin settings page
     router.get(
       '/admin/plugins/flowprompt-sso',
