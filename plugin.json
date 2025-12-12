@@ -10,8 +10,8 @@
       "method": "init"
     },
     {
-      "hook": "filter:scripts.get",
-      "method": "filterScriptsGet"
+      "hook": "filter:header.build",
+      "method": "filterHeaderBuild"
     }
   ],
   "templates": "./templates",
