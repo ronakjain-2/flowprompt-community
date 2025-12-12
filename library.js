@@ -442,6 +442,40 @@ const Plugin = {
       console.error('[FlowPrompt SSO] Error loading user data:', err);
     }
 
+    // CRITICAL: Configure session cookie options BEFORE saving
+    // This ensures express-session sets the cookie with correct SameSite=None from the start
+    const meta = require.main.require('./src/meta');
+    let cookieDomain = null;
+    try {
+      if (meta && meta.config && meta.config.cookieDomain) {
+        cookieDomain = meta.config.cookieDomain;
+      }
+    } catch (e) {}
+    if (!cookieDomain) {
+      try {
+        const config = require('/srv/nodebb/config.json');
+        if (config && config.cookieDomain) cookieDomain = config.cookieDomain;
+      } catch (e) {}
+    }
+    if (!cookieDomain) cookieDomain = '.flowprompt.ai';
+
+    const isSecure =
+      req.protocol === 'https' ||
+      req.get('X-Forwarded-Proto') === 'https' ||
+      req.secure ||
+      false;
+
+    // Configure session cookie options BEFORE save
+    if (req.session.cookie) {
+      req.session.cookie.domain = cookieDomain;
+      req.session.cookie.secure = !!isSecure;
+      req.session.cookie.sameSite = 'None'; // CRITICAL: Set SameSite=None
+      req.session.cookie.path = '/';
+      console.log(
+        `[FlowPrompt SSO] Configured session cookie: domain=${cookieDomain}, sameSite=None, secure=${!!isSecure}`,
+      );
+    }
+
     await new Promise((resolve, reject) => {
       req.session.save((err) => {
         if (err) {
@@ -539,46 +573,80 @@ const Plugin = {
         `[FlowPrompt SSO] Final check - req.user: ${req.user ? req.user.uid : 'undefined'}`,
       );
 
-      // intercept express-session cookie creation and ensure SameSite=None is used
+      // CRITICAL: Intercept Set-Cookie headers AFTER express-session sets them
+      // express-session uses session store cookie options, not req.session.cookie
+      // We need to modify the actual Set-Cookie header to change SameSite=None
       const cookieName =
         (req.session && req.session.cookie && req.session.cookie.name) ||
         'express.sid';
-      const originalCookie = res.cookie.bind(res);
-      res.cookie = function (name, value, options) {
-        if (name === cookieName) {
-          const cookieDomain = (function () {
-            try {
-              const meta = require.main.require('./src/meta');
-              return (
-                (meta && meta.config && meta.config.cookieDomain) ||
-                require('/srv/nodebb/config.json').cookieDomain ||
-                '.flowprompt.ai'
-              );
-            } catch (e) {
-              return '.flowprompt.ai';
-            }
-          })();
 
-          const isSecure =
-            req.protocol === 'https' ||
-            (req.get && req.get('X-Forwarded-Proto') === 'https') ||
-            !!req.secure;
+      // Hook into response to modify Set-Cookie headers before sending
+      const originalEnd = res.end.bind(res);
+      res.end = function (chunk, encoding) {
+        // Get existing Set-Cookie headers
+        let setCookies = res.getHeader('Set-Cookie') || [];
+        if (!Array.isArray(setCookies)) {
+          setCookies = [setCookies];
+        }
 
-          options = {
-            ...options,
-            domain: cookieDomain,
-            sameSite: 'None',
-            secure: !!isSecure,
-            httpOnly: options?.httpOnly !== false,
-            path: options?.path || '/',
-          };
+        // Find and replace express.sid cookie with SameSite=None
+        const modifiedCookies = setCookies.map((cookie) => {
+          if (
+            typeof cookie === 'string' &&
+            cookie.startsWith(`${cookieName}=`)
+          ) {
+            // Extract the cookie value (everything before first semicolon)
+            const cookieValue = cookie
+              .split(';')[0]
+              .substring(cookieName.length + 1);
+
+            // Get cookie domain
+            const cookieDomain = (function () {
+              try {
+                const meta = require.main.require('./src/meta');
+                return (
+                  (meta && meta.config && meta.config.cookieDomain) ||
+                  require('/srv/nodebb/config.json').cookieDomain ||
+                  '.flowprompt.ai'
+                );
+              } catch (e) {
+                return '.flowprompt.ai';
+              }
+            })();
+
+            const isSecure =
+              req.protocol === 'https' ||
+              (req.get && req.get('X-Forwarded-Proto') === 'https') ||
+              !!req.secure;
+
+            // Rebuild cookie with SameSite=None
+            return `${cookieName}=${cookieValue}; Domain=${cookieDomain}; Path=/; HttpOnly; Secure; SameSite=None`;
+          }
+          return cookie;
+        });
+
+        // Remove duplicates (keep only the last occurrence of each cookie name)
+        const seen = new Set();
+        const uniqueCookies = [];
+        for (let i = modifiedCookies.length - 1; i >= 0; i--) {
+          const cookie = modifiedCookies[i];
+          const cookieNameFromHeader = cookie.split('=')[0];
+          if (!seen.has(cookieNameFromHeader)) {
+            seen.add(cookieNameFromHeader);
+            uniqueCookies.unshift(cookie);
+          }
+        }
+
+        // Set the modified headers
+        if (uniqueCookies.length > 0) {
+          res.setHeader('Set-Cookie', uniqueCookies);
           console.log(
-            '[FlowPrompt SSO] Intercepted',
+            '[FlowPrompt SSO] Modified Set-Cookie headers: removed duplicates, set SameSite=None for',
             cookieName,
-            'and set SameSite=None, Secure',
           );
         }
-        return originalCookie(name, value, options);
+
+        return originalEnd(chunk, encoding);
       };
 
       // final save to ensure cookie is created
@@ -633,62 +701,9 @@ const Plugin = {
         );
       }
 
-      // At this point express-session likely set the signed session cookie in res.headers
-      // To ensure SameSite/Domain attributes are correct we will inspect any Set-Cookie headers
-      // and re-emit a cookie with the same value but with our desired flags.
-      try {
-        let existingSetCookies = res.getHeader && res.getHeader('Set-Cookie');
-        if (!existingSetCookies) existingSetCookies = [];
-        if (!Array.isArray(existingSetCookies))
-          existingSetCookies = [existingSetCookies];
-
-        // find cookie header for cookieName (express.sid)
-        let found = null;
-        for (const hdr of existingSetCookies) {
-          if (typeof hdr === 'string' && hdr.startsWith(`${cookieName}=`)) {
-            // extract the raw cookie value (before first ;)
-            const firstPart = hdr.split(';')[0];
-            const cookieValue = firstPart.substring(firstPart.indexOf('=') + 1);
-            found = cookieValue;
-            break;
-          }
-        }
-
-        if (found) {
-          // build new Set-Cookie header with SameSite=None and Domain
-          const newCookie = `${cookieName}=${found}; Domain=${cookieDomain}; Path=/; HttpOnly; Secure; SameSite=None`;
-          // append the new cookie header so browser receives it (alongside the original)
-          const newSetCookies = existingSetCookies.concat([newCookie]);
-          res.setHeader('Set-Cookie', newSetCookies);
-          console.log(
-            '[FlowPrompt SSO] Overwrote session cookie attributes via Set-Cookie header',
-          );
-        } else {
-          // fallback: try to explicitly set cookie by name using req.sessionID as best-effort
-          try {
-            const cookieValAttempt = String(req.sessionID);
-            res.cookie(cookieName, cookieValAttempt, {
-              domain: cookieDomain,
-              path: '/',
-              httpOnly: true,
-              secure: !!isSecure,
-              sameSite: 'None',
-            });
-            console.log(
-              '[FlowPrompt SSO] Fallback: set session cookie name with raw sessionID (may be unsigned)',
-            );
-          } catch (e) {
-            console.warn(
-              '[FlowPrompt SSO] Could not overwrite session cookie; proceeding anyway',
-            );
-          }
-        }
-      } catch (e) {
-        console.error(
-          '[FlowPrompt SSO] Error while trying to overwrite session cookie attributes:',
-          e && e.message,
-        );
-      }
+      // NOTE: Session cookie options are configured in createSession() before save()
+      // express-session will use those options when setting the cookie
+      // No need to manually overwrite here
 
       // small delay to avoid race with client redirect + session store propagation
       await new Promise((r) => setTimeout(r, 100));
