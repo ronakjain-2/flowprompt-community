@@ -762,8 +762,55 @@ const Plugin = {
         `[FlowPrompt SSO] Final check - req.user: ${req.user ? req.user.uid : 'undefined'}`,
       );
 
+      // CRITICAL: Intercept res.cookie BEFORE express-session sets the cookie
+      // This ensures we can override SameSite=None when express-session sets express.sid
+      const cookieName =
+        (req.session && req.session.cookie && req.session.cookie.name) ||
+        'express.sid';
+      const originalCookie = res.cookie.bind(res);
+
+      res.cookie = function (name, value, options) {
+        // If this is the express.sid cookie, override with SameSite=None
+        if (name === cookieName) {
+          const cookieDomain = (function () {
+            try {
+              const meta = require.main.require('./src/meta');
+              return (
+                (meta && meta.config && meta.config.cookieDomain) ||
+                require('/srv/nodebb/config.json').cookieDomain ||
+                '.flowprompt.ai'
+              );
+            } catch (e) {
+              return '.flowprompt.ai';
+            }
+          })();
+
+          const isSecure =
+            req.protocol === 'https' ||
+            (req.get && req.get('X-Forwarded-Proto') === 'https') ||
+            !!req.secure;
+
+          // Override options to ensure SameSite=None
+          options = {
+            ...options,
+            domain: cookieDomain,
+            sameSite: 'None',
+            secure: !!isSecure,
+            httpOnly: options?.httpOnly !== false, // Preserve httpOnly if set
+            path: options?.path || '/',
+          };
+          console.log(
+            '[FlowPrompt SSO] Intercepted',
+            cookieName,
+            'and set SameSite=None, Secure',
+          );
+        }
+        return originalCookie(name, value, options);
+      };
+
       // CRITICAL: Ensure session is saved one more time before redirect
       // This ensures the session cookie is definitely set in the response
+      // The res.cookie override above will intercept and fix the SameSite attribute
       await new Promise((resolve, reject) => {
         req.session.save((err) => {
           if (err) {
@@ -842,56 +889,8 @@ const Plugin = {
 
       // NOTE: Don't manually set sid or express.sid cookies
       // express-session/NodeBB will handle these automatically
-      // Setting them manually can cause session regeneration issues
-      // The uid cookie above is sufficient for NodeBB's client-side code
-
-      // --- Ensure express/session cookie has SameSite=None so cross-site flows + websockets work reliably ---
-      try {
-        // Determine cookie name; fallback to express.sid
-        const cookieName =
-          (req.session && req.session.cookie && req.session.cookie.name) ||
-          'express.sid';
-        const cookieValue = String(req.sessionID);
-
-        const cookieDomain = (function () {
-          try {
-            const meta = require.main.require('./src/meta');
-            return (
-              (meta && meta.config && meta.config.cookieDomain) ||
-              require('/srv/nodebb/config.json').cookieDomain ||
-              '.flowprompt.ai'
-            );
-          } catch (e) {
-            return '.flowprompt.ai';
-          }
-        })();
-
-        const isSecure =
-          req.protocol === 'https' ||
-          (req.get && req.get('X-Forwarded-Proto') === 'https') ||
-          !!req.secure;
-
-        const cookieOptions = {
-          domain: cookieDomain,
-          path: '/',
-          httpOnly: true,
-          secure: !!isSecure,
-          sameSite: 'None',
-        };
-
-        // Overwrite the session cookie attributes (same value, new flags)
-        res.cookie(cookieName, cookieValue, cookieOptions);
-        console.log(
-          '[FlowPrompt SSO] Overwrote session cookie',
-          cookieName,
-          'with SameSite=None, Secure',
-        );
-      } catch (err) {
-        console.error(
-          '[FlowPrompt SSO] Failed to overwrite session cookie attributes:',
-          err && err.message,
-        );
-      }
+      // The res.cookie intercept above will catch express-session's cookie setting
+      // and automatically override SameSite=None when express-session sets the cookie
 
       // CRITICAL: Add a small delay to ensure session is fully committed
       // This helps prevent "login session no longer matches" errors
