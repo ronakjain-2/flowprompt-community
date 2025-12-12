@@ -496,35 +496,9 @@ const Plugin = {
       req.secure ||
       false;
 
-    // CRITICAL: Explicitly set the session cookie to ensure it's sent
-    // express-session should handle this, but we need to ensure the cookie domain is correct
-    // Get the session cookie options from express-session
-    const sessionCookieOptions = req.sessionStore?.cookie || {};
-
-    // Build cookie options matching NodeBB's configuration
-    const cookieOptions = {
-      httpOnly: sessionCookieOptions.httpOnly !== false,
-      secure: isSecure,
-      sameSite: sessionCookieOptions.sameSite || 'lax',
-      path: sessionCookieOptions.path || '/',
-    };
-
-    // Set cookie domain if configured in NodeBB
-    if (cookieDomain) {
-      cookieOptions.domain = cookieDomain;
-      console.log(`[FlowPrompt SSO] Setting cookie domain to: ${cookieDomain}`);
-    } else {
-      console.log(
-        '[FlowPrompt SSO] Cookie domain not set - using default (current domain)',
-      );
-    }
-
-    // Explicitly set the cookie with the session ID
-    // This ensures the cookie is definitely in the response
-    res.cookie(cookieName, req.sessionID, cookieOptions);
-    console.log(
-      `[FlowPrompt SSO] Explicitly set cookie: ${cookieName}=${req.sessionID}`,
-    );
+    // Let express-session/NodeBB set the session cookie (signed) to avoid duplicates
+    // Setting it manually can create a second, unsigned cookie. The NodeBB session
+    // middleware will set the correct cookie (with signature) based on its config.
 
     // Verify session is set correctly
     console.log(`[FlowPrompt SSO] Created session for user: ${uid}`);
