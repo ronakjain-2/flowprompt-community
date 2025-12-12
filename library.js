@@ -58,6 +58,7 @@ const Plugin = {
 
     // Register SSO route
     // Note: We skip CSRF for this GET redirect flow, but ensure session middleware runs
+    // The session middleware should already be running globally, but we ensure it's active
     router.get('/sso/jwt', middleware.maintenanceMode, self.handleSSO);
 
     // Register admin settings page
@@ -374,7 +375,33 @@ const Plugin = {
       console.log(
         `[FlowPrompt SSO] Clearing existing session for UID: ${req.session.uid}`,
       );
+      // Destroy the old session before creating a new one
+      await new Promise((resolve) => {
+        req.session.destroy((err) => {
+          if (err) {
+            console.error('[FlowPrompt SSO] Session destroy error:', err);
+          }
+          resolve();
+        });
+      });
     }
+
+    // CRITICAL: Regenerate session to prevent session fixation attacks
+    // and ensure a fresh session ID is created
+    // This creates a new session with a new ID
+    await new Promise((resolve, reject) => {
+      req.session.regenerate((err) => {
+        if (err) {
+          console.error('[FlowPrompt SSO] Session regenerate error:', err);
+          reject(err);
+        } else {
+          console.log(
+            `[FlowPrompt SSO] Session regenerated with new ID: ${req.sessionID}`,
+          );
+          resolve();
+        }
+      });
+    });
 
     // Set user session - this is the key to authentication in NodeBB
     // NodeBB checks req.session.uid to determine if user is logged in
@@ -421,39 +448,24 @@ const Plugin = {
     await db.sortedSetAdd('users:online', Date.now(), uid);
 
     // Get NodeBB cookie configuration
-    // Only cookieDomain is available in NodeBB ACP Settings
     const cookieDomain = meta.config.cookieDomain || '';
 
     // Get cookie name from session store (express-session stores it here)
-    // Default to 'express.sid' if not available
     const cookieName =
       req.sessionStore?.cookie?.name ||
       req.session?.cookie?.name ||
       'express.sid';
 
     // Determine secure flag from request
-    // Check both protocol and X-Forwarded-Proto (for nginx proxy)
     const isSecure =
       req.protocol === 'https' ||
       req.get('X-Forwarded-Proto') === 'https' ||
       req.secure ||
       false;
 
-    // Explicitly set the session cookie with NodeBB's settings
-    const cookieOptions = {
-      httpOnly: true,
-      secure: isSecure,
-      sameSite: 'lax',
-      maxAge: 1000 * 60 * 60 * 24 * 14, // 14 days
-      path: '/',
-    };
-
-    if (cookieDomain) {
-      cookieOptions.domain = cookieDomain;
-    }
-
-    // Set cookie with the current session ID
-    res.cookie(cookieName, req.sessionID, cookieOptions);
+    // IMPORTANT: Let express-session handle the cookie automatically
+    // Don't manually set it as that can interfere with express-session's cookie handling
+    // The session.save() call above will trigger express-session to set the cookie
 
     // Verify session is set correctly
     console.log(`[FlowPrompt SSO] Created session for user: ${uid}`);
@@ -556,14 +568,19 @@ const Plugin = {
         `[FlowPrompt SSO] Final check - req.user: ${req.user ? req.user.uid : 'undefined'}`,
       );
 
-      // Ensure response headers are sent before redirect
-      // This ensures the Set-Cookie header is included
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-      res.setHeader('Pragma', 'no-cache');
-      res.setHeader('Expires', '0');
-
-      // Small delay to ensure cookie is set and session is committed
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // CRITICAL: Ensure session is saved one more time before redirect
+      // This ensures the session cookie is definitely set in the response
+      await new Promise((resolve, reject) => {
+        req.session.save((err) => {
+          if (err) {
+            console.error('[FlowPrompt SSO] Final session save error:', err);
+            reject(err);
+          } else {
+            console.log('[FlowPrompt SSO] Final session save successful');
+            resolve();
+          }
+        });
+      });
 
       // Final verification - check if session is still set
       if (req.session.uid !== uid) {
@@ -572,8 +589,44 @@ const Plugin = {
         );
       }
 
-      // Redirect to forum - use 302 (temporary redirect) to ensure cookie is sent
-      return res.redirect(302, redirectPath);
+      // CRITICAL: The session cookie must be set in the response before redirect
+      // Use a client-side redirect with a small delay to ensure cookie is sent
+      // This is more reliable than HTTP redirect for session cookies
+      console.log(
+        `[FlowPrompt SSO] Sending HTML page with client-side redirect...`,
+      );
+
+      // Escape redirectPath for use in HTML/JavaScript
+      const escapedRedirectPath = redirectPath
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/"/g, '&quot;');
+
+      // Send HTML page that ensures cookie is set before redirect
+      const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>Redirecting...</title>
+  <script>
+    // Small delay to ensure cookie is set before redirect
+    setTimeout(function() {
+      window.location.href = '${escapedRedirectPath}';
+    }, 100);
+  </script>
+</head>
+<body>
+  <p>Redirecting to forum...</p>
+  <p>If you are not redirected automatically, <a href="${escapedRedirectPath}">click here</a>.</p>
+</body>
+</html>`;
+
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      return res.send(html);
     } catch (err) {
       console.error('[FlowPrompt SSO] SSO error:', err);
       return res.status(401).render('500', {
