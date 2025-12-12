@@ -375,21 +375,22 @@ const Plugin = {
       console.log(
         `[FlowPrompt SSO] Clearing existing session for UID: ${req.session.uid}`,
       );
-      // Destroy the old session before creating a new one
-      await new Promise((resolve) => {
-        req.session.destroy((err) => {
-          if (err) {
-            console.error('[FlowPrompt SSO] Session destroy error:', err);
-          }
-          resolve();
-        });
-      });
     }
 
     // CRITICAL: Regenerate session to prevent session fixation attacks
     // and ensure a fresh session ID is created
-    // This creates a new session with a new ID
+    // regenerate() automatically destroys the old session and creates a new one
+    // We don't need to destroy manually - regenerate handles it
     await new Promise((resolve, reject) => {
+      // Check if regenerate method exists (it should always exist in express-session)
+      if (!req.session || typeof req.session.regenerate !== 'function') {
+        console.error(
+          '[FlowPrompt SSO] Session regenerate method not available',
+        );
+        reject(new Error('Session regenerate method not available'));
+        return;
+      }
+
       req.session.regenerate((err) => {
         if (err) {
           console.error('[FlowPrompt SSO] Session regenerate error:', err);
