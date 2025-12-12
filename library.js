@@ -775,40 +775,10 @@ const Plugin = {
         );
       }
 
-      // SID cookie: HttpOnly, used by server to look up session
-      try {
-        res.cookie('sid', String(req.sessionID), {
-          ...baseOpts,
-          httpOnly: true,
-        });
-        console.log(
-          `[FlowPrompt SSO] Set cookie sid=${req.sessionID} for domain ${cookieDomain}`,
-        );
-      } catch (e) {
-        console.error(
-          '[FlowPrompt SSO] Failed to set sid cookie',
-          e && e.message,
-        );
-      }
-
-      // For backwards/compatibility set express-session cookie name too (NodeBB may use this)
-      try {
-        const cookieName =
-          (req.session && req.session.cookie && req.session.cookie.name) ||
-          'express.sid';
-        res.cookie(cookieName, String(req.sessionID), {
-          ...baseOpts,
-          httpOnly: true,
-        });
-        console.log(
-          `[FlowPrompt SSO] Set cookie ${cookieName}=${req.sessionID} for domain ${cookieDomain}`,
-        );
-      } catch (e) {
-        console.error(
-          '[FlowPrompt SSO] Failed to set express cookie fallback',
-          e && e.message,
-        );
-      }
+      // NOTE: Don't manually set sid or express.sid cookies
+      // express-session/NodeBB will handle these automatically
+      // Setting them manually can cause session regeneration issues
+      // The uid cookie above is sufficient for NodeBB's client-side code
 
       // CRITICAL: Add a small delay to ensure session is fully committed
       // This helps prevent "login session no longer matches" errors
