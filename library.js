@@ -1,80 +1,58 @@
+// library.js - FlowPrompt SSO plugin (updated)
+// Fixes: robust nonce TTL, explicit cookie attribute overwrite (SameSite=None), uid cookie set, session cookie overwrite
+'use strict';
+
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const fetch = require('node-fetch');
 const jwksClient = require('jwks-rsa');
 
 const Plugin = {
-  /**
-   * Plugin metadata
-   */
   id: 'flowprompt-sso',
   name: 'FlowPrompt SSO',
   description: 'JWT-based SSO integration with FlowPrompt',
-  version: '1.0.0',
+  version: '1.0.1',
 
-  /**
-   * Plugin configuration (set via NodeBB Admin Panel)
-   */
   config: {
     flowpromptUrl: 'https://api.flowprompt.ai',
-    publicKeyUrl: null, // Auto-set from flowpromptUrl
-    jwksUrl: null, // Auto-set from flowpromptUrl
-    publicKey: null, // Direct PEM key (alternative to JWKS)
+    publicKeyUrl: null,
+    jwksUrl: null,
+    publicKey: null,
     issuer: 'flowprompt',
     audience: 'nodebb',
-    nonceStore: 'memory', // 'memory' or 'redis'
+    nonceStore: 'memory',
     redisUrl: 'redis://localhost:6379',
     autoCreateUsers: true,
     defaultGroup: 'registered-users',
+    allowedRedirectHosts: '',
   },
 
-  /**
-   * Nonce store for one-time token validation
-   */
   nonceStore: null,
-
-  /**
-   * JWKS client for key discovery
-   */
   jwksClient: null,
 
-  /**
-   * Initialize plugin
-   */
   async init(params) {
-    const { router, middleware, controllers } = params;
+    const { router, middleware } = params;
     const self = Plugin;
 
-    // Load configuration from NodeBB settings
+    // Load config from NodeBB meta/settings
     self.loadConfig();
 
-    // Initialize nonce store
+    // Init nonce store safely
     self.initNonceStore();
 
-    // Initialize JWKS client if using JWKS
+    // Init JWKS if configured
     if (self.config.jwksUrl && !self.config.publicKey) {
       self.initJWKS();
     }
 
-    // Register SSO route
-    // Note: We skip CSRF for this GET redirect flow, but ensure session middleware runs
-    // The session middleware should already be running globally, but we ensure it's active
+    // Register route
     router.get('/sso/jwt', middleware.maintenanceMode, self.handleSSO);
 
-    // CRITICAL: Add middleware to ensure user is loaded from session on all requests
-    // NodeBB's authentication middleware should do this, but we ensure it happens
-    // This must be registered BEFORE other routes so it runs on all requests
-    // Use a Symbol to prevent running multiple times per request (more reliable)
-    // Only run on page requests, not API/static assets to reduce overhead
+    // Middleware to populate req.user from session where missing
     const SSO_PROCESSED = Symbol('flowpromptSSOProcessed');
     router.use(async (req, res, next) => {
-      // Skip if already processed or if user is already loaded
-      if (req[SSO_PROCESSED] || req.user) {
-        return next();
-      }
+      if (req[SSO_PROCESSED] || req.user) return next();
 
-      // Skip API routes and static assets - only process page requests
-      // This reduces overhead and prevents conflicts with NodeBB's API authentication
       if (
         req.path.startsWith('/api/') ||
         req.path.startsWith('/assets/') ||
@@ -84,9 +62,8 @@ const Plugin = {
         return next();
       }
 
-      // Only process if session has UID but req.user is not set
       if (req.session?.uid && !req.user) {
-        req[SSO_PROCESSED] = true; // Mark as processed using Symbol
+        req[SSO_PROCESSED] = true;
         const User = require.main.require('./src/user');
         try {
           const userData = await User.getUserFields(req.session.uid, [
@@ -101,14 +78,11 @@ const Plugin = {
           if (userData) {
             req.user = userData;
             req.uid = req.session.uid;
-            // Only log once per unique session to reduce noise
-            // Use a Set to track logged sessions for this request cycle
             if (!global._flowpromptSSOLoggedSessions) {
               global._flowpromptSSOLoggedSessions = new Set();
             }
             if (!global._flowpromptSSOLoggedSessions.has(req.sessionID)) {
               global._flowpromptSSOLoggedSessions.add(req.sessionID);
-              // Clear the set periodically to prevent memory leak (keep last 100)
               if (global._flowpromptSSOLoggedSessions.size > 100) {
                 global._flowpromptSSOLoggedSessions.clear();
               }
@@ -124,12 +98,12 @@ const Plugin = {
           );
         }
       }
+
       next();
     });
 
-    // Debug route to inspect session after redirect
+    // Debug route
     router.get('/sso/session-debug', async (req, res) => {
-      // Try to manually load user if session has UID but req.user is not set
       if (req.session?.uid && !req.user) {
         const User = require.main.require('./src/user');
         try {
@@ -160,7 +134,7 @@ const Plugin = {
       });
     });
 
-    // Register admin settings page
+    // Admin routes
     router.get(
       '/admin/plugins/flowprompt-sso',
       middleware.admin.buildHeader,
@@ -168,14 +142,12 @@ const Plugin = {
     );
     router.get('/api/admin/plugins/flowprompt-sso', self.renderAdmin);
 
-    // Register settings save endpoint
     router.post(
       '/api/admin/plugins/flowprompt-sso',
       middleware.admin.checkPrivileges,
       self.saveSettings,
     );
 
-    // Log initialization
     console.log('[FlowPrompt SSO] Plugin initialized');
     console.log(
       `[FlowPrompt SSO] FlowPrompt URL: ${self.config.flowpromptUrl}`,
@@ -190,74 +162,52 @@ const Plugin = {
     return self;
   },
 
-  /**
-   * Load configuration from NodeBB settings
-   */
   loadConfig() {
     const self = Plugin;
     const meta = require.main.require('./src/meta');
-
-    // Load settings from database
     const settings = meta.settings.get('flowprompt-sso') || {};
+    self.config = { ...self.config, ...settings };
 
-    // Merge with defaults
-    self.config = {
-      ...self.config,
-      ...settings,
-    };
-
-    // Auto-set URLs if flowpromptUrl is provided
     if (self.config.flowpromptUrl && !self.config.publicKeyUrl) {
       self.config.publicKeyUrl = `${self.config.flowpromptUrl}/api/sso/public-key.pem`;
     }
-
     if (self.config.flowpromptUrl && !self.config.jwksUrl) {
       self.config.jwksUrl = `${self.config.flowpromptUrl}/.well-known/jwks.json`;
     }
   },
 
-  /**
-   * Initialize nonce store
-   */
   initNonceStore() {
     const self = Plugin;
     const db = require.main.require('./src/database');
 
     if (self.config.nonceStore === 'redis') {
-      // Use NodeBB's Redis connection
       self.nonceStore = {
         async setNonce(nonce, ttl) {
           const key = `sso:nonce:${nonce}`;
-
           await db.setObject(key, { used: false, timestamp: Date.now() });
           await db.expire(key, ttl);
         },
         async consumeNonce(nonce) {
           const key = `sso:nonce:${nonce}`;
           const exists = await db.exists(key);
-
           if (exists) {
             await db.delete(key);
             return true;
           }
-
           return false;
         },
         async hasNonce(nonce) {
           const key = `sso:nonce:${nonce}`;
-
           return await db.exists(key);
         },
       };
     } else {
-      // In-memory store (for development)
       const store = new Map();
 
-      // Safe nonce setter (in-memory) with TTL validation
       async function setNonceSafe(nonce, ttlSeconds) {
         let ttl = parseInt(ttlSeconds, 10);
         if (!Number.isFinite(ttl) || ttl <= 0) {
-          ttl = 120; // default 2 minutes
+          ttl = 120;
         }
         store.set(nonce, Date.now());
         const ms = Math.max(1, ttl * 1000);
@@ -276,11 +226,9 @@ const Plugin = {
         },
         async consumeNonce(nonce) {
           const exists = store.has(nonce);
-
           if (exists) {
             store.delete(nonce);
           }
-
           return exists;
         },
         async hasNonce(nonce) {
@@ -290,37 +238,27 @@ const Plugin = {
     }
   },
 
-  /**
-   * Initialize JWKS client
-   */
   initJWKS() {
     const self = Plugin;
-
     self.jwksClient = jwksClient({
       jwksUri: self.config.jwksUrl,
       cache: true,
-      cacheMaxAge: 3600000, // 1 hour
+      cacheMaxAge: 3600000,
       rateLimit: true,
       jwksRequestsPerMinute: 5,
     });
   },
 
-  /**
-   * Get public key for JWT verification
-   */
   async getPublicKey(kid) {
     const self = Plugin;
 
-    // If direct public key is configured, use it
     if (self.config.publicKey) {
       return self.config.publicKey;
     }
 
-    // If JWKS is configured, fetch key
     if (self.jwksClient) {
       try {
         const key = await self.jwksClient.getSigningKey(kid);
-
         return key.getPublicKey();
       } catch (err) {
         console.error('[FlowPrompt SSO] Error fetching JWKS key:', err);
@@ -328,17 +266,13 @@ const Plugin = {
       }
     }
 
-    // Fallback: fetch from public key URL
     if (self.config.publicKeyUrl) {
       try {
         const response = await fetch(self.config.publicKeyUrl);
-
         if (!response.ok) {
           throw new Error(`Failed to fetch public key: ${response.statusText}`);
         }
-
         const publicKey = await response.text();
-
         return publicKey;
       } catch (err) {
         console.error('[FlowPrompt SSO] Error fetching public key:', err);
@@ -349,49 +283,33 @@ const Plugin = {
     throw new Error('No public key configuration found');
   },
 
-  /**
-   * Verify JWT token
-   */
   async verifyToken(token) {
     const self = Plugin;
 
     try {
-      // Decode token header to get kid
       const decoded = jwt.decode(token, { complete: true });
-
       if (!decoded || !decoded.header) {
         throw new Error('Invalid token format');
       }
-
       const { kid } = decoded.header;
-
-      // Get public key
       const publicKey = await self.getPublicKey(kid);
-
-      // Verify token
       const payload = jwt.verify(token, publicKey, {
         algorithms: ['RS256'],
         issuer: self.config.issuer,
         audience: self.config.audience,
       });
 
-      // Check nonce (one-time use)
       const nonce = payload.jti || payload.nonce;
-
       if (!nonce) {
         throw new Error('Token missing nonce (jti)');
       }
 
-      // Check if nonce was already used
       const wasUsed = await self.nonceStore.hasNonce(nonce);
-
       if (wasUsed) {
         throw new Error('Token already used (replay attack detected)');
       }
 
-      // Consume nonce
       await self.nonceStore.consumeNonce(nonce);
-
       return payload;
     } catch (err) {
       console.error('[FlowPrompt SSO] Token verification error:', err.message);
@@ -399,48 +317,30 @@ const Plugin = {
     }
   },
 
-  /**
-   * Find or create NodeBB user
-   */
   async findOrCreateUser(payload) {
     const self = Plugin;
     const User = require.main.require('./src/user');
     const Groups = require.main.require('./src/groups');
 
     const { email } = payload;
+    if (!email) throw new Error('Token missing email claim');
 
-    if (!email) {
-      throw new Error('Token missing email claim');
-    }
-
-    // Try to find existing user by email
     let uid = await User.getUidByEmail(email);
-
     if (uid) {
-      // User exists - update profile if needed
       const updateData = {};
-
       if (
         payload.name &&
         payload.name !== (await User.getUserField(uid, 'username'))
       ) {
-        // Note: Username changes might require admin privileges
-        // For now, just update fullname
         updateData.fullname = payload.name;
       }
-
-      if (payload.picture) {
-        updateData.picture = payload.picture;
-      }
-
+      if (payload.picture) updateData.picture = payload.picture;
       if (Object.keys(updateData).length > 0) {
         await User.setUserFields(uid, updateData);
       }
-
       return uid;
     }
 
-    // User doesn't exist - create new user
     if (!self.config.autoCreateUsers) {
       throw new Error('User not found and auto-create is disabled');
     }
@@ -448,25 +348,18 @@ const Plugin = {
     const username = payload.username || payload.name || email.split('@')[0];
     const fullname = payload.name || username;
 
-    // Create user
     uid = await User.create({
       username,
       email,
       fullname,
       picture: payload.picture || '',
-      // Ensure NodeBB treats the email as confirmed to avoid validation email
       'email:confirmed': 1,
       'email:validationPending': 0,
       'email:pending': 0,
     });
 
-    // CRITICAL: Explicitly set the email after user creation
-    // NodeBB sometimes doesn't set the email properly during User.create()
-    // We need to use User.setUserField() to ensure it's registered
     try {
-      // Set email using User.setUserField
       await User.setUserField(uid, 'email', email);
-      // Confirm the email immediately using UserEmail.confirmByUid
       const UserEmail = require.main.require('./src/user/email');
       await UserEmail.confirmByUid(uid);
       console.log(
@@ -474,10 +367,8 @@ const Plugin = {
       );
     } catch (err) {
       console.error('[FlowPrompt SSO] Error setting email:', err);
-      // Continue anyway - user is created even if email setting fails
     }
 
-    // Add to default group
     if (self.config.defaultGroup) {
       try {
         await Groups.join(self.config.defaultGroup, uid);
@@ -493,31 +384,21 @@ const Plugin = {
     return uid;
   },
 
-  /**
-   * Create NodeBB session
-   */
   async createSession(req, res, uid) {
     const self = Plugin;
     const User = require.main.require('./src/user');
     const db = require.main.require('./src/database');
-    const meta = require.main.require('./src/meta');
 
-    // Clear any existing session data first
     if (req.session.uid) {
       console.log(
         `[FlowPrompt SSO] Clearing existing session for UID: ${req.session.uid}`,
       );
-      // If user is already logged in with the same UID, don't regenerate
-      // This prevents session mismatch errors
       if (req.session.uid === uid) {
         console.log(
           `[FlowPrompt SSO] User ${uid} already logged in, reusing existing session`,
         );
-        // Just update the session, don't regenerate
         req.session.jwt = true;
-        // Continue to set user data below
       } else {
-        // Different user - regenerate session
         await new Promise((resolve, reject) => {
           if (!req.session || typeof req.session.regenerate !== 'function') {
             console.error(
@@ -526,7 +407,6 @@ const Plugin = {
             reject(new Error('Session regenerate method not available'));
             return;
           }
-
           req.session.regenerate((err) => {
             if (err) {
               console.error('[FlowPrompt SSO] Session regenerate error:', err);
@@ -541,18 +421,12 @@ const Plugin = {
         });
       }
     } else {
-      // No existing session - create new one (but don't regenerate empty session)
-      // Just set the UID directly
       console.log('[FlowPrompt SSO] No existing session, creating new one');
     }
 
-    // Set user session - this is the key to authentication in NodeBB
-    // NodeBB checks req.session.uid to determine if user is logged in
     req.session.uid = uid;
-    req.session.jwt = true; // Mark as JWT-authenticated
+    req.session.jwt = true;
 
-    // Also set req.user for NodeBB middleware compatibility
-    // Some NodeBB middleware checks req.user instead of req.session.uid
     try {
       const userData = await User.getUserFields(uid, [
         'uid',
@@ -566,10 +440,8 @@ const Plugin = {
       }
     } catch (err) {
       console.error('[FlowPrompt SSO] Error loading user data:', err);
-      // Continue anyway - req.session.uid should be enough
     }
 
-    // CRITICAL: Save session and ensure it's committed to store
     await new Promise((resolve, reject) => {
       req.session.save((err) => {
         if (err) {
@@ -584,122 +456,33 @@ const Plugin = {
       });
     });
 
-    // Update user last login time
     await User.updateLastOnlineTime(uid);
-
-    // Mark user as online in NodeBB's sorted set
     await db.sortedSetAdd('users:online', Date.now(), uid);
 
-    // Get NodeBB cookie configuration with robust fallback
-    // Determine cookieDomain robustly: prefer NodeBB meta.config.cookieDomain, fallback to config.json.cookieDomain, else use empty string
-    let cookieDomain = null;
-    try {
-      if (meta && meta.config && meta.config.cookieDomain) {
-        cookieDomain = meta.config.cookieDomain;
-      }
-    } catch (e) {
-      // ignore
-    }
-
-    if (!cookieDomain) {
-      // fallback to config.json read
-      try {
-        const config = require('/srv/nodebb/config.json');
-        if (config && config.cookieDomain) {
-          cookieDomain = config.cookieDomain;
-        }
-      } catch (e) {
-        // ignore
-      }
-    }
-
-    // final fallback - use empty string to match express-session default (no domain set)
-    if (!cookieDomain) cookieDomain = '';
-
-    // Get cookie name from session store (express-session stores it here)
-    const cookieName =
-      req.sessionStore?.cookie?.name ||
-      req.session?.cookie?.name ||
-      'express.sid';
-
-    // Determine secure flag from request
-    const isSecure =
-      req.protocol === 'https' ||
-      req.get('X-Forwarded-Proto') === 'https' ||
-      req.secure ||
-      false;
-
-    // Let express-session/NodeBB set the session cookie (signed) to avoid duplicates
-    // Setting it manually can create a second, unsigned cookie. The NodeBB session
-    // middleware will set the correct cookie (with signature) based on its config.
-
-    // Verify session is set correctly
+    // Logging for debug
     console.log(`[FlowPrompt SSO] Created session for user: ${uid}`);
     console.log(`[FlowPrompt SSO] Session ID: ${req.sessionID}`);
     console.log(
       `[FlowPrompt SSO] Session UID in req.session: ${req.session.uid}`,
     );
-    console.log(`[FlowPrompt SSO] Cookie name: ${cookieName}`);
-    console.log(`[FlowPrompt SSO] Cookie secure: ${isSecure}`);
-    console.log(
-      `[FlowPrompt SSO] Cookie domain: ${cookieDomain || 'default (not set)'}`,
-    );
-    console.log(`[FlowPrompt SSO] Request protocol: ${req.protocol}`);
-    console.log(
-      `[FlowPrompt SSO] X-Forwarded-Proto: ${req.get('X-Forwarded-Proto') || 'not set'}`,
-    );
-
-    // Double-check: verify session was saved to store
-    const sessionStore = req.sessionStore;
-    if (sessionStore) {
-      sessionStore.get(req.sessionID, (err, session) => {
-        if (err) {
-          console.error(
-            '[FlowPrompt SSO] Error getting session from store:',
-            err,
-          );
-        } else if (session && session.uid === uid) {
-          console.log(
-            '[FlowPrompt SSO] Session verified in store - UID matches',
-          );
-        } else {
-          console.error(
-            '[FlowPrompt SSO] Session NOT found in store or UID mismatch',
-          );
-        }
-      });
-    }
   },
 
-  /**
-   * Handle SSO request
-   * GET /sso/jwt?token=<jwt>&redirect=<path>
-   */
   async handleSSO(req, res, next) {
     const self = Plugin;
 
     try {
-      // Get token from query parameter
       const { token } = req.query;
-
       if (!token) {
-        return res.status(400).render('500', {
-          error: 'Missing token parameter',
-        });
+        return res
+          .status(400)
+          .render('500', { error: 'Missing token parameter' });
       }
 
-      // Verify token
       const payload = await self.verifyToken(token);
-
-      // Find or create user
       const uid = await self.findOrCreateUser(payload);
-
-      // Create session
       await self.createSession(req, res, uid);
 
-      // CRITICAL: After creating session, ensure NodeBB's authentication middleware
-      // recognizes the user. We need to explicitly load the user data into req.user
-      // so that NodeBB's middleware chain recognizes the authenticated user.
+      // load user data into req.user to ensure middleware compatibility
       const User = require.main.require('./src/user');
       try {
         const userData = await User.getUserFields(uid, [
@@ -725,10 +508,7 @@ const Plugin = {
         );
       }
 
-      // Get redirect path
       const redirectPath = payload.redirect || req.query.redirect || '/';
-
-      // Validate redirect path (security: prevent open redirect)
       const allowedHosts = (self.config.allowedRedirectHosts || '')
         .split(',')
         .filter(Boolean);
@@ -736,21 +516,18 @@ const Plugin = {
       if (allowedHosts.length > 0 && !redirectPath.startsWith('/')) {
         try {
           const redirectUrl = new URL(redirectPath, `https://${req.hostname}`);
-
           if (!allowedHosts.includes(redirectUrl.hostname)) {
             throw new Error('Redirect host not allowed');
           }
         } catch (err) {
-          // If redirectPath is relative, allow it
           if (!redirectPath.startsWith('/')) {
-            return res.status(400).render('500', {
-              error: 'Invalid redirect path',
-            });
+            return res
+              .status(400)
+              .render('500', { error: 'Invalid redirect path' });
           }
         }
       }
 
-      // Log session details for debugging
       console.log(`[FlowPrompt SSO] Redirecting to: ${redirectPath}`);
       console.log(
         `[FlowPrompt SSO] Final check - Session UID: ${req.session.uid}`,
@@ -762,15 +539,12 @@ const Plugin = {
         `[FlowPrompt SSO] Final check - req.user: ${req.user ? req.user.uid : 'undefined'}`,
       );
 
-      // CRITICAL: Intercept res.cookie BEFORE express-session sets the cookie
-      // This ensures we can override SameSite=None when express-session sets express.sid
+      // intercept express-session cookie creation and ensure SameSite=None is used
       const cookieName =
         (req.session && req.session.cookie && req.session.cookie.name) ||
         'express.sid';
       const originalCookie = res.cookie.bind(res);
-
       res.cookie = function (name, value, options) {
-        // If this is the express.sid cookie, override with SameSite=None
         if (name === cookieName) {
           const cookieDomain = (function () {
             try {
@@ -790,13 +564,12 @@ const Plugin = {
             (req.get && req.get('X-Forwarded-Proto') === 'https') ||
             !!req.secure;
 
-          // Override options to ensure SameSite=None
           options = {
             ...options,
             domain: cookieDomain,
             sameSite: 'None',
             secure: !!isSecure,
-            httpOnly: options?.httpOnly !== false, // Preserve httpOnly if set
+            httpOnly: options?.httpOnly !== false,
             path: options?.path || '/',
           };
           console.log(
@@ -808,9 +581,7 @@ const Plugin = {
         return originalCookie(name, value, options);
       };
 
-      // CRITICAL: Ensure session is saved one more time before redirect
-      // This ensures the session cookie is definitely set in the response
-      // The res.cookie override above will intercept and fix the SameSite attribute
+      // final save to ensure cookie is created
       await new Promise((resolve, reject) => {
         req.session.save((err) => {
           if (err) {
@@ -823,58 +594,33 @@ const Plugin = {
         });
       });
 
-      // Final verification - check if session is still set
-      if (req.session.uid !== uid) {
-        console.error(
-          `[FlowPrompt SSO] WARNING: Session UID mismatch! Expected ${uid}, got ${req.session.uid}`,
-        );
-      }
-
-      // CRITICAL: Explicitly set cookies that NodeBB's client-side code expects
-      // This prevents "login session no longer matches" errors
-      // Use parent domain so cookies work across subdomains (app.flowprompt.ai -> community.flowprompt.ai)
-
-      // Determine cookieDomain robustly: prefer NodeBB meta.config.cookieDomain, fallback to config.json.cookieDomain, else use parent domain
+      // robust cookieDomain detection
       let cookieDomain = null;
       try {
         const meta = require.main.require('./src/meta');
-        if (meta && meta.config && meta.config.cookieDomain) {
+        if (meta && meta.config && meta.config.cookieDomain)
           cookieDomain = meta.config.cookieDomain;
-        }
-      } catch (e) {
-        // ignore
-      }
-
+      } catch (e) {}
       if (!cookieDomain) {
-        // fallback to config.json read
         try {
           const config = require('/srv/nodebb/config.json');
-          if (config && config.cookieDomain) {
-            cookieDomain = config.cookieDomain;
-          }
-        } catch (e) {
-          // ignore
-        }
+          if (config && config.cookieDomain) cookieDomain = config.cookieDomain;
+        } catch (e) {}
       }
-
-      // final fallback
       if (!cookieDomain) cookieDomain = '.flowprompt.ai';
 
       const isSecure =
         req.protocol === 'https' ||
         (req.get && req.get('X-Forwarded-Proto') === 'https') ||
-        req.secure;
-
-      // Base options for cross-site use
-      // Use SameSite=None for cross-subdomain SSO (app.flowprompt.ai -> community.flowprompt.ai)
+        !!req.secure;
       const baseOpts = {
         path: '/',
         domain: cookieDomain,
-        sameSite: 'None', // Use 'None' for cross-subdomain SSO
-        secure: !!isSecure, // Required when SameSite=None
+        sameSite: 'None',
+        secure: !!isSecure,
       };
 
-      // UID cookie: readable client-side (NodeBB expects 'uid' cookie)
+      // set uid cookie
       try {
         res.cookie('uid', String(uid), { ...baseOpts, httpOnly: false });
         console.log(
@@ -887,28 +633,74 @@ const Plugin = {
         );
       }
 
-      // NOTE: Don't manually set sid or express.sid cookies
-      // express-session/NodeBB will handle these automatically
-      // The res.cookie intercept above will catch express-session's cookie setting
-      // and automatically override SameSite=None when express-session sets the cookie
+      // At this point express-session likely set the signed session cookie in res.headers
+      // To ensure SameSite/Domain attributes are correct we will inspect any Set-Cookie headers
+      // and re-emit a cookie with the same value but with our desired flags.
+      try {
+        let existingSetCookies = res.getHeader && res.getHeader('Set-Cookie');
+        if (!existingSetCookies) existingSetCookies = [];
+        if (!Array.isArray(existingSetCookies))
+          existingSetCookies = [existingSetCookies];
 
-      // CRITICAL: Add a small delay to ensure session is fully committed
-      // This helps prevent "login session no longer matches" errors
-      // by ensuring the session is fully established before redirect
-      await new Promise((resolve) => setTimeout(resolve, 150));
+        // find cookie header for cookieName (express.sid)
+        let found = null;
+        for (const hdr of existingSetCookies) {
+          if (typeof hdr === 'string' && hdr.startsWith(`${cookieName}=`)) {
+            // extract the raw cookie value (before first ;)
+            const firstPart = hdr.split(';')[0];
+            const cookieValue = firstPart.substring(firstPart.indexOf('=') + 1);
+            found = cookieValue;
+            break;
+          }
+        }
 
-      console.log(
-        `[FlowPrompt SSO] Sending HTTP redirect with session cookie...`,
-      );
+        if (found) {
+          // build new Set-Cookie header with SameSite=None and Domain
+          const newCookie = `${cookieName}=${found}; Domain=${cookieDomain}; Path=/; HttpOnly; Secure; SameSite=None`;
+          // append the new cookie header so browser receives it (alongside the original)
+          const newSetCookies = existingSetCookies.concat([newCookie]);
+          res.setHeader('Set-Cookie', newSetCookies);
+          console.log(
+            '[FlowPrompt SSO] Overwrote session cookie attributes via Set-Cookie header',
+          );
+        } else {
+          // fallback: try to explicitly set cookie by name using req.sessionID as best-effort
+          try {
+            const cookieValAttempt = String(req.sessionID);
+            res.cookie(cookieName, cookieValAttempt, {
+              domain: cookieDomain,
+              path: '/',
+              httpOnly: true,
+              secure: !!isSecure,
+              sameSite: 'None',
+            });
+            console.log(
+              '[FlowPrompt SSO] Fallback: set session cookie name with raw sessionID (may be unsigned)',
+            );
+          } catch (e) {
+            console.warn(
+              '[FlowPrompt SSO] Could not overwrite session cookie; proceeding anyway',
+            );
+          }
+        }
+      } catch (e) {
+        console.error(
+          '[FlowPrompt SSO] Error while trying to overwrite session cookie attributes:',
+          e && e.message,
+        );
+      }
 
-      // Set no-cache headers to prevent caching
+      // small delay to avoid race with client redirect + session store propagation
+      await new Promise((r) => setTimeout(r, 100));
+
+      // response caching headers
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.setHeader('Pragma', 'no-cache');
       res.setHeader('Expires', '0');
 
-      // CRITICAL: Use an internal redirect (res.redirect with same host)
-      // This ensures NodeBB's middleware chain runs and loads the user from session
-      // The session cookie is already set in the response headers
+      console.log(
+        '[FlowPrompt SSO] Sending HTTP redirect with session cookie...',
+      );
       return res.redirect(302, redirectPath);
     } catch (err) {
       console.error('[FlowPrompt SSO] SSO error:', err);
@@ -919,21 +711,14 @@ const Plugin = {
     }
   },
 
-  /**
-   * Render admin settings page
-   */
   async renderAdmin(req, res, next) {
     const self = Plugin;
-
     res.render('admin/plugins/flowprompt-sso', {
       title: 'FlowPrompt SSO Settings',
       config: self.config,
     });
   },
 
-  /**
-   * Save admin settings
-   */
   async saveSettings(req, res, next) {
     const self = Plugin;
     const meta = require.main.require('./src/meta');
@@ -953,11 +738,9 @@ const Plugin = {
     await meta.settings.set('flowprompt-sso', settings);
     self.config = { ...self.config, ...settings };
 
-    // Reinitialize if needed
     if (settings.nonceStore !== self.config.nonceStore) {
       self.initNonceStore();
     }
-
     if (settings.flowpromptUrl && !settings.publicKey) {
       self.initJWKS();
     }
