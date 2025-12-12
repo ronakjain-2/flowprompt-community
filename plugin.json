@@ -14,10 +14,6 @@
       "method": "filterScriptsGet"
     }
   ],
-  "staticDirs": {
-    "public": "./public"
-  },
   "templates": "./templates",
   "languages": "./languages"
 }
-
