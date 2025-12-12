@@ -253,10 +253,26 @@ const Plugin = {
       // In-memory store (for development)
       const store = new Map();
 
+      // Safe nonce setter (in-memory) with TTL validation
+      async function setNonceSafe(nonce, ttlSeconds) {
+        let ttl = parseInt(ttlSeconds, 10);
+        if (!Number.isFinite(ttl) || ttl <= 0) {
+          ttl = 120; // default 2 minutes
+        }
+        store.set(nonce, Date.now());
+        const ms = Math.max(1, ttl * 1000);
+        setTimeout(() => {
+          try {
+            store.delete(nonce);
+          } catch (e) {
+            // ignore
+          }
+        }, ms);
+      }
+
       self.nonceStore = {
         async setNonce(nonce, ttl) {
-          store.set(nonce, Date.now());
-          setTimeout(() => store.delete(nonce), ttl * 1000);
+          await setNonceSafe(nonce, ttl);
         },
         async consumeNonce(nonce) {
           const exists = store.has(nonce);
@@ -828,6 +844,54 @@ const Plugin = {
       // express-session/NodeBB will handle these automatically
       // Setting them manually can cause session regeneration issues
       // The uid cookie above is sufficient for NodeBB's client-side code
+
+      // --- Ensure express/session cookie has SameSite=None so cross-site flows + websockets work reliably ---
+      try {
+        // Determine cookie name; fallback to express.sid
+        const cookieName =
+          (req.session && req.session.cookie && req.session.cookie.name) ||
+          'express.sid';
+        const cookieValue = String(req.sessionID);
+
+        const cookieDomain = (function () {
+          try {
+            const meta = require.main.require('./src/meta');
+            return (
+              (meta && meta.config && meta.config.cookieDomain) ||
+              require('/srv/nodebb/config.json').cookieDomain ||
+              '.flowprompt.ai'
+            );
+          } catch (e) {
+            return '.flowprompt.ai';
+          }
+        })();
+
+        const isSecure =
+          req.protocol === 'https' ||
+          (req.get && req.get('X-Forwarded-Proto') === 'https') ||
+          !!req.secure;
+
+        const cookieOptions = {
+          domain: cookieDomain,
+          path: '/',
+          httpOnly: true,
+          secure: !!isSecure,
+          sameSite: 'None',
+        };
+
+        // Overwrite the session cookie attributes (same value, new flags)
+        res.cookie(cookieName, cookieValue, cookieOptions);
+        console.log(
+          '[FlowPrompt SSO] Overwrote session cookie',
+          cookieName,
+          'with SameSite=None, Secure',
+        );
+      } catch (err) {
+        console.error(
+          '[FlowPrompt SSO] Failed to overwrite session cookie attributes:',
+          err && err.message,
+        );
+      }
 
       // CRITICAL: Add a small delay to ensure session is fully committed
       // This helps prevent "login session no longer matches" errors
