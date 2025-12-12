@@ -746,34 +746,27 @@ const Plugin = {
 
       // CRITICAL: Explicitly set cookies that NodeBB's client-side code expects
       // This prevents "login session no longer matches" errors
-      // IMPORTANT: Use the same domain as express-session to avoid cookie conflicts
+      // Use parent domain so cookies work across subdomains (app.flowprompt.ai -> community.flowprompt.ai)
       const meta = require.main.require('./src/meta');
-      // Get cookie domain from NodeBB config, or use empty string to match express-session default
-      // If NodeBB has cookieDomain set, use it; otherwise don't set domain (matches express-session)
-      const cookieDomain = meta.config.cookieDomain || '';
+      const cookieDomain = meta.config.cookieDomain || '.flowprompt.ai';
       const isSecure =
         req.protocol === 'https' ||
         (req.get && req.get('X-Forwarded-Proto') === 'https') ||
         req.secure;
 
-      // Base options - match express-session's cookie settings
+      // Base options for cross-site use
       const baseOpts = {
         path: '/',
-        sameSite: 'Lax', // Use 'Lax' for same-site
+        domain: cookieDomain,
+        sameSite: 'Lax', // Use 'Lax' for same-site, 'None' only if truly cross-site
         secure: !!isSecure,
       };
 
-      // Only set domain if NodeBB has it configured (to match express-session)
-      if (cookieDomain) {
-        baseOpts.domain = cookieDomain;
-      }
-
       // UID cookie: readable client-side (NodeBB expects 'uid' cookie)
-      // This is the key cookie that NodeBB's client-side code checks
       try {
         res.cookie('uid', String(uid), { ...baseOpts, httpOnly: false });
         console.log(
-          `[FlowPrompt SSO] Set cookie uid=${uid}${cookieDomain ? ` for domain ${cookieDomain}` : ' (no domain set)'}`,
+          `[FlowPrompt SSO] Set cookie uid=${uid} for domain ${cookieDomain}`,
         );
       } catch (e) {
         console.error(
