@@ -744,6 +744,72 @@ const Plugin = {
         );
       }
 
+      // CRITICAL: Explicitly set cookies that NodeBB's client-side code expects
+      // This prevents "login session no longer matches" errors
+      // Use parent domain so cookies work across subdomains (app.flowprompt.ai -> community.flowprompt.ai)
+      const meta = require.main.require('./src/meta');
+      const cookieDomain = meta.config.cookieDomain || '.flowprompt.ai';
+      const isSecure =
+        req.protocol === 'https' ||
+        (req.get && req.get('X-Forwarded-Proto') === 'https') ||
+        req.secure;
+
+      // Base options for cross-site use
+      const baseOpts = {
+        path: '/',
+        domain: cookieDomain,
+        sameSite: 'Lax', // Use 'Lax' for same-site, 'None' only if truly cross-site
+        secure: !!isSecure,
+      };
+
+      // UID cookie: readable client-side (NodeBB expects 'uid' cookie)
+      try {
+        res.cookie('uid', String(uid), { ...baseOpts, httpOnly: false });
+        console.log(
+          `[FlowPrompt SSO] Set cookie uid=${uid} for domain ${cookieDomain}`,
+        );
+      } catch (e) {
+        console.error(
+          '[FlowPrompt SSO] Failed to set uid cookie',
+          e && e.message,
+        );
+      }
+
+      // SID cookie: HttpOnly, used by server to look up session
+      try {
+        res.cookie('sid', String(req.sessionID), {
+          ...baseOpts,
+          httpOnly: true,
+        });
+        console.log(
+          `[FlowPrompt SSO] Set cookie sid=${req.sessionID} for domain ${cookieDomain}`,
+        );
+      } catch (e) {
+        console.error(
+          '[FlowPrompt SSO] Failed to set sid cookie',
+          e && e.message,
+        );
+      }
+
+      // For backwards/compatibility set express-session cookie name too (NodeBB may use this)
+      try {
+        const cookieName =
+          (req.session && req.session.cookie && req.session.cookie.name) ||
+          'express.sid';
+        res.cookie(cookieName, String(req.sessionID), {
+          ...baseOpts,
+          httpOnly: true,
+        });
+        console.log(
+          `[FlowPrompt SSO] Set cookie ${cookieName}=${req.sessionID} for domain ${cookieDomain}`,
+        );
+      } catch (e) {
+        console.error(
+          '[FlowPrompt SSO] Failed to set express cookie fallback',
+          e && e.message,
+        );
+      }
+
       // CRITICAL: Add a small delay to ensure session is fully committed
       // This helps prevent "login session no longer matches" errors
       // by ensuring the session is fully established before redirect
