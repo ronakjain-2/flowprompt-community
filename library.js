@@ -65,10 +65,22 @@ const Plugin = {
     // NodeBB's authentication middleware should do this, but we ensure it happens
     // This must be registered BEFORE other routes so it runs on all requests
     // Use a Symbol to prevent running multiple times per request (more reliable)
+    // Only run on page requests, not API/static assets to reduce overhead
     const SSO_PROCESSED = Symbol('flowpromptSSOProcessed');
     router.use(async (req, res, next) => {
       // Skip if already processed or if user is already loaded
       if (req[SSO_PROCESSED] || req.user) {
+        return next();
+      }
+
+      // Skip API routes and static assets - only process page requests
+      // This reduces overhead and prevents conflicts with NodeBB's API authentication
+      if (
+        req.path.startsWith('/api/') ||
+        req.path.startsWith('/assets/') ||
+        req.path.startsWith('/uploads/') ||
+        req.path.startsWith('/socket.io/')
+      ) {
         return next();
       }
 
@@ -89,10 +101,21 @@ const Plugin = {
           if (userData) {
             req.user = userData;
             req.uid = req.session.uid;
-            // Log once per request
-            console.log(
-              `[FlowPrompt SSO] Middleware: Loaded user ${req.session.uid} from session`,
-            );
+            // Only log once per unique session to reduce noise
+            // Use a Set to track logged sessions for this request cycle
+            if (!global._flowpromptSSOLoggedSessions) {
+              global._flowpromptSSOLoggedSessions = new Set();
+            }
+            if (!global._flowpromptSSOLoggedSessions.has(req.sessionID)) {
+              global._flowpromptSSOLoggedSessions.add(req.sessionID);
+              // Clear the set periodically to prevent memory leak (keep last 100)
+              if (global._flowpromptSSOLoggedSessions.size > 100) {
+                global._flowpromptSSOLoggedSessions.clear();
+              }
+              console.log(
+                `[FlowPrompt SSO] Middleware: Loaded user ${req.session.uid} from session`,
+              );
+            }
           }
         } catch (err) {
           console.error(
