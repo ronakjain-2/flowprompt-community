@@ -59,7 +59,39 @@ const Plugin = {
     // Register SSO route
     // Note: We skip CSRF for this GET redirect flow, but ensure session middleware runs
     // The session middleware should already be running globally, but we ensure it's active
+    // We also need to ensure NodeBB's authentication middleware runs after session is set
     router.get('/sso/jwt', middleware.maintenanceMode, self.handleSSO);
+
+    // Hook into NodeBB's response middleware to ensure user is loaded
+    // This ensures that after we set req.session.uid, NodeBB loads req.user
+    const hooks = require.main.require('./src/hooks');
+    hooks.on('response:router.page', async function (hookData) {
+      const { req, res } = hookData;
+
+      // If session has uid but req.user is not set, load the user
+      if (req.session && req.session.uid && !req.user) {
+        const User = require.main.require('./src/user');
+        try {
+          const userData = await User.getUserFields(req.session.uid, [
+            'uid',
+            'username',
+            'email',
+            'picture',
+          ]);
+          if (userData) {
+            req.user = userData;
+            req.uid = req.session.uid;
+            console.log(
+              `[FlowPrompt SSO] Hook: Loaded user ${req.session.uid} from session`,
+            );
+          }
+        } catch (err) {
+          console.error('[FlowPrompt SSO] Hook: Error loading user:', err);
+        }
+      }
+
+      return hookData;
+    });
 
     // Register admin settings page
     router.get(
@@ -558,6 +590,34 @@ const Plugin = {
       // Create session
       await self.createSession(req, res, uid);
 
+      // CRITICAL: After creating session, ensure NodeBB's authentication middleware
+      // recognizes the user. We need to explicitly load the user data into req.user
+      // so that NodeBB's middleware chain recognizes the authenticated user.
+      const User = require.main.require('./src/user');
+      try {
+        const userData = await User.getUserFields(uid, [
+          'uid',
+          'username',
+          'email',
+          'picture',
+          'joindate',
+          'lastonline',
+          'status',
+        ]);
+        if (userData) {
+          req.user = userData;
+          req.uid = uid;
+          console.log(
+            `[FlowPrompt SSO] Loaded user data into req.user: ${userData.username}`,
+          );
+        }
+      } catch (err) {
+        console.error(
+          '[FlowPrompt SSO] Error loading user data after session creation:',
+          err,
+        );
+      }
+
       // Get redirect path
       const redirectPath = payload.redirect || req.query.redirect || '/';
 
@@ -616,33 +676,29 @@ const Plugin = {
         );
       }
 
-      // CRITICAL: The session cookie must be set in the response before redirect
-      // Use a client-side redirect with a small delay to ensure cookie is sent
-      // This is more reliable than HTTP redirect for session cookies
-      console.log(
-        `[FlowPrompt SSO] Sending HTML page with client-side redirect...`,
-      );
+      // CRITICAL: Before redirecting, ensure NodeBB's authentication middleware
+      // will recognize the session. The issue is that after redirect, NodeBB's
+      // middleware needs to load the user from the session.
+      //
+      // We've already set req.session.uid and req.user, but NodeBB's middleware
+      // might need to run to fully authenticate the user.
+      //
+      // Try using an internal redirect through NodeBB's router to ensure
+      // all middleware runs, or use a standard redirect and ensure the session
+      // is properly loaded.
 
-      // Escape redirectPath for use in HTML/JavaScript
-      const escapedRedirectPath = redirectPath
-        .replace(/\\/g, '\\\\')
-        .replace(/'/g, "\\'")
-        .replace(/"/g, '&quot;');
-
-      // Instead of HTML redirect, use a standard HTTP redirect
-      // The cookie should already be set in the response headers
-      // This is more reliable and allows NodeBB's middleware to run properly
       console.log(
         `[FlowPrompt SSO] Sending HTTP redirect with session cookie...`,
       );
 
-      // Set no-cache headers
+      // Set no-cache headers to prevent caching
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.setHeader('Pragma', 'no-cache');
       res.setHeader('Expires', '0');
 
-      // Use 302 redirect - this ensures the cookie is sent with the redirect
-      // NodeBB's middleware will run on the redirected page and load the session
+      // CRITICAL: Use an internal redirect (res.redirect with same host)
+      // This ensures NodeBB's middleware chain runs and loads the user from session
+      // The session cookie is already set in the response headers
       return res.redirect(302, redirectPath);
     } catch (err) {
       console.error('[FlowPrompt SSO] SSO error:', err);
