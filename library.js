@@ -421,16 +421,28 @@ const Plugin = {
     await db.sortedSetAdd('users:online', Date.now(), uid);
 
     // Get NodeBB cookie configuration
-    const cookieName = meta.config.cookieName || 'express.sid';
-    const cookieSecure =
-      meta.config.cookieSecure === 'true' || req.protocol === 'https';
+    // Only cookieDomain is available in NodeBB ACP Settings
     const cookieDomain = meta.config.cookieDomain || '';
 
+    // Get cookie name from session store (express-session stores it here)
+    // Default to 'express.sid' if not available
+    const cookieName =
+      req.sessionStore?.cookie?.name ||
+      req.session?.cookie?.name ||
+      'express.sid';
+
+    // Determine secure flag from request
+    // Check both protocol and X-Forwarded-Proto (for nginx proxy)
+    const isSecure =
+      req.protocol === 'https' ||
+      req.get('X-Forwarded-Proto') === 'https' ||
+      req.secure ||
+      false;
+
     // Explicitly set the session cookie with NodeBB's settings
-    // Use the NEW session ID after regeneration
     const cookieOptions = {
       httpOnly: true,
-      secure: cookieSecure,
+      secure: isSecure,
       sameSite: 'lax',
       maxAge: 1000 * 60 * 60 * 24 * 14, // 14 days
       path: '/',
@@ -440,7 +452,7 @@ const Plugin = {
       cookieOptions.domain = cookieDomain;
     }
 
-    // Set cookie with the current session ID (after regeneration)
+    // Set cookie with the current session ID
     res.cookie(cookieName, req.sessionID, cookieOptions);
 
     // Verify session is set correctly
@@ -450,8 +462,14 @@ const Plugin = {
       `[FlowPrompt SSO] Session UID in req.session: ${req.session.uid}`,
     );
     console.log(`[FlowPrompt SSO] Cookie name: ${cookieName}`);
-    console.log(`[FlowPrompt SSO] Cookie secure: ${cookieSecure}`);
-    console.log(`[FlowPrompt SSO] Cookie domain: ${cookieDomain || 'default'}`);
+    console.log(`[FlowPrompt SSO] Cookie secure: ${isSecure}`);
+    console.log(
+      `[FlowPrompt SSO] Cookie domain: ${cookieDomain || 'default (not set)'}`,
+    );
+    console.log(`[FlowPrompt SSO] Request protocol: ${req.protocol}`);
+    console.log(
+      `[FlowPrompt SSO] X-Forwarded-Proto: ${req.get('X-Forwarded-Proto') || 'not set'}`,
+    );
 
     // Double-check: verify session was saved to store
     const sessionStore = req.sessionStore;
