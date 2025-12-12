@@ -56,8 +56,9 @@ const Plugin = {
       self.initJWKS();
     }
 
-    // Register SSO route (no CSRF required for this GET redirect flow)
-    router.get('/sso/jwt', self.handleSSO);
+    // Register SSO route
+    // Note: We skip CSRF for this GET redirect flow, but ensure session middleware runs
+    router.get('/sso/jwt', middleware.maintenanceMode, self.handleSSO);
 
     // Register admin settings page
     router.get(
@@ -368,29 +369,46 @@ const Plugin = {
     const db = require.main.require('./src/database');
     const meta = require.main.require('./src/meta');
 
-    // Regenerate session to prevent fixation attacks
-    await new Promise((resolve, reject) => {
-      req.session.regenerate((err) => {
-        if (err) {
-          console.error('[FlowPrompt SSO] Session regenerate error:', err);
-          reject(err);
-        } else {
-          resolve();
-        }
-      });
-    });
+    // Clear any existing session data first
+    if (req.session.uid) {
+      console.log(
+        `[FlowPrompt SSO] Clearing existing session for UID: ${req.session.uid}`,
+      );
+    }
 
-    // Set user session
+    // Set user session - this is the key to authentication in NodeBB
+    // NodeBB checks req.session.uid to determine if user is logged in
     req.session.uid = uid;
     req.session.jwt = true; // Mark as JWT-authenticated
 
-    // Save session and wait for it to complete
+    // Also set req.user for NodeBB middleware compatibility
+    // Some NodeBB middleware checks req.user instead of req.session.uid
+    try {
+      const userData = await User.getUserFields(uid, [
+        'uid',
+        'username',
+        'email',
+        'picture',
+      ]);
+      if (userData) {
+        req.user = userData;
+        req.uid = uid;
+      }
+    } catch (err) {
+      console.error('[FlowPrompt SSO] Error loading user data:', err);
+      // Continue anyway - req.session.uid should be enough
+    }
+
+    // CRITICAL: Save session and ensure it's committed to store
     await new Promise((resolve, reject) => {
       req.session.save((err) => {
         if (err) {
           console.error('[FlowPrompt SSO] Session save error:', err);
           reject(err);
         } else {
+          console.log(
+            `[FlowPrompt SSO] Session saved successfully with UID: ${uid}`,
+          );
           resolve();
         }
       });
@@ -399,7 +417,7 @@ const Plugin = {
     // Update user last login time
     await User.updateLastOnlineTime(uid);
 
-    // Mark user as online
+    // Mark user as online in NodeBB's sorted set
     await db.sortedSetAdd('users:online', Date.now(), uid);
 
     // Get NodeBB cookie configuration
@@ -409,6 +427,7 @@ const Plugin = {
     const cookieDomain = meta.config.cookieDomain || '';
 
     // Explicitly set the session cookie with NodeBB's settings
+    // Use the NEW session ID after regeneration
     const cookieOptions = {
       httpOnly: true,
       secure: cookieSecure,
@@ -421,12 +440,39 @@ const Plugin = {
       cookieOptions.domain = cookieDomain;
     }
 
+    // Set cookie with the current session ID (after regeneration)
     res.cookie(cookieName, req.sessionID, cookieOptions);
 
+    // Verify session is set correctly
     console.log(`[FlowPrompt SSO] Created session for user: ${uid}`);
     console.log(`[FlowPrompt SSO] Session ID: ${req.sessionID}`);
+    console.log(
+      `[FlowPrompt SSO] Session UID in req.session: ${req.session.uid}`,
+    );
     console.log(`[FlowPrompt SSO] Cookie name: ${cookieName}`);
     console.log(`[FlowPrompt SSO] Cookie secure: ${cookieSecure}`);
+    console.log(`[FlowPrompt SSO] Cookie domain: ${cookieDomain || 'default'}`);
+
+    // Double-check: verify session was saved to store
+    const sessionStore = req.sessionStore;
+    if (sessionStore) {
+      sessionStore.get(req.sessionID, (err, session) => {
+        if (err) {
+          console.error(
+            '[FlowPrompt SSO] Error getting session from store:',
+            err,
+          );
+        } else if (session && session.uid === uid) {
+          console.log(
+            '[FlowPrompt SSO] Session verified in store - UID matches',
+          );
+        } else {
+          console.error(
+            '[FlowPrompt SSO] Session NOT found in store or UID mismatch',
+          );
+        }
+      });
+    }
   },
 
   /**
@@ -482,14 +528,34 @@ const Plugin = {
 
       // Log session details for debugging
       console.log(`[FlowPrompt SSO] Redirecting to: ${redirectPath}`);
-      console.log(`[FlowPrompt SSO] Session UID: ${req.session.uid}`);
-      console.log(`[FlowPrompt SSO] Session ID: ${req.sessionID}`);
+      console.log(
+        `[FlowPrompt SSO] Final check - Session UID: ${req.session.uid}`,
+      );
+      console.log(
+        `[FlowPrompt SSO] Final check - Session ID: ${req.sessionID}`,
+      );
+      console.log(
+        `[FlowPrompt SSO] Final check - req.user: ${req.user ? req.user.uid : 'undefined'}`,
+      );
 
-      // Small delay to ensure cookie is set before redirect
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      // Ensure response headers are sent before redirect
+      // This ensures the Set-Cookie header is included
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
 
-      // Redirect to forum
-      return res.redirect(redirectPath);
+      // Small delay to ensure cookie is set and session is committed
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      // Final verification - check if session is still set
+      if (req.session.uid !== uid) {
+        console.error(
+          `[FlowPrompt SSO] WARNING: Session UID mismatch! Expected ${uid}, got ${req.session.uid}`,
+        );
+      }
+
+      // Redirect to forum - use 302 (temporary redirect) to ensure cookie is sent
+      return res.redirect(302, redirectPath);
     } catch (err) {
       console.error('[FlowPrompt SSO] SSO error:', err);
       return res.status(401).render('500', {
