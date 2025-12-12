@@ -744,16 +744,10 @@ const Plugin = {
         );
       }
 
-      // CRITICAL: Before redirecting, ensure NodeBB's authentication middleware
-      // will recognize the session. The issue is that after redirect, NodeBB's
-      // middleware needs to load the user from the session.
-      //
-      // We've already set req.session.uid and req.user, but NodeBB's middleware
-      // might need to run to fully authenticate the user.
-      //
-      // Try using an internal redirect through NodeBB's router to ensure
-      // all middleware runs, or use a standard redirect and ensure the session
-      // is properly loaded.
+      // CRITICAL: Add a small delay to ensure session is fully committed
+      // This helps prevent "login session no longer matches" errors
+      // by ensuring the session is fully established before redirect
+      await new Promise((resolve) => setTimeout(resolve, 150));
 
       console.log(
         `[FlowPrompt SSO] Sending HTTP redirect with session cookie...`,
