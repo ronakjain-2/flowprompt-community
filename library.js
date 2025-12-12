@@ -64,16 +64,17 @@ const Plugin = {
     // CRITICAL: Add middleware to ensure user is loaded from session on all requests
     // NodeBB's authentication middleware should do this, but we ensure it happens
     // This must be registered BEFORE other routes so it runs on all requests
-    // Use a flag to prevent running multiple times per request
+    // Use a Symbol to prevent running multiple times per request (more reliable)
+    const SSO_PROCESSED = Symbol('flowpromptSSOProcessed');
     router.use(async (req, res, next) => {
       // Skip if already processed or if user is already loaded
-      if (req._flowpromptSSOProcessed || req.user) {
+      if (req[SSO_PROCESSED] || req.user) {
         return next();
       }
 
       // Only process if session has UID but req.user is not set
       if (req.session?.uid && !req.user) {
-        req._flowpromptSSOProcessed = true; // Mark as processed
+        req[SSO_PROCESSED] = true; // Mark as processed using Symbol
         const User = require.main.require('./src/user');
         try {
           const userData = await User.getUserFields(req.session.uid, [
@@ -88,13 +89,10 @@ const Plugin = {
           if (userData) {
             req.user = userData;
             req.uid = req.session.uid;
-            // Only log once per request to reduce noise
-            if (!req._flowpromptSSOLogged) {
-              console.log(
-                `[FlowPrompt SSO] Middleware: Loaded user ${req.session.uid} from session`,
-              );
-              req._flowpromptSSOLogged = true;
-            }
+            // Log once per request
+            console.log(
+              `[FlowPrompt SSO] Middleware: Loaded user ${req.session.uid} from session`,
+            );
           }
         } catch (err) {
           console.error(
@@ -425,11 +423,12 @@ const Plugin = {
 
     // CRITICAL: Explicitly set the email after user creation
     // NodeBB sometimes doesn't set the email properly during User.create()
-    // We need to use UserEmail.set() to ensure it's registered
+    // We need to use User.setUserField() to ensure it's registered
     try {
+      // Set email using User.setUserField
+      await User.setUserField(uid, 'email', email);
+      // Confirm the email immediately using UserEmail.confirmByUid
       const UserEmail = require.main.require('./src/user/email');
-      await UserEmail.set(uid, email);
-      // Confirm the email immediately
       await UserEmail.confirmByUid(uid);
       console.log(
         `[FlowPrompt SSO] Email ${email} set and confirmed for user ${uid}`,
