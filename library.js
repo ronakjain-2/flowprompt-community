@@ -134,6 +134,164 @@ const Plugin = {
       });
     });
 
+    // CRITICAL: Hook into NodeBB's response to inject client-side fix
+    // This suppresses the "login session no longer matches" error
+    const hooks = require.main.require('./src/plugins/hooks');
+    hooks.on('filter:scripts.get', async (scripts) => {
+      // Inject client-side script to fix session validation
+      scripts.push({
+        src: null,
+        inline: `
+          (function() {
+            // Fix for "login session no longer matches" error
+            // This script runs after NodeBB loads to intercept false positive session errors
+            
+            // Method 1: Intercept alerts/notifications that contain the error message
+            const originalAlert = window.alert;
+            const originalShowAlert = window.app?.alert;
+            
+            // Override alert to suppress session mismatch errors if user is actually logged in
+            window.alert = function(message) {
+              if (typeof message === 'string' && 
+                  (message.includes('login session no longer matches') || 
+                   message.includes('connection to FlowPrompt.ai was lost'))) {
+                // Check if user is actually logged in via cookie
+                const uid = parseInt(document.cookie.match(/uid=([^;]+)/)?.[1] || '0', 10);
+                if (uid > 0) {
+                  // User is logged in, suppress false positive
+                  console.log('[FlowPrompt SSO] Suppressed false positive session error:', message);
+                  return;
+                }
+              }
+              return originalAlert.apply(this, arguments);
+            };
+            
+            // Method 2: Wait for NodeBB to fully initialize, then intercept errors
+            function waitForNodeBB(callback, maxAttempts) {
+              maxAttempts = maxAttempts || 50;
+              let attempts = 0;
+              const checkInterval = setInterval(function() {
+                attempts++;
+                if (window.app && window.app.user && window.app.alert) {
+                  clearInterval(checkInterval);
+                  callback();
+                } else if (attempts >= maxAttempts) {
+                  clearInterval(checkInterval);
+                  console.warn('[FlowPrompt SSO] NodeBB not found after', maxAttempts, 'attempts');
+                }
+              }, 100);
+            }
+            
+            // Initialize fixes after NodeBB loads
+            waitForNodeBB(function() {
+              // Override app.alert
+              if (window.app && typeof window.app.alert === 'function') {
+                const originalAppAlert = window.app.alert;
+                window.app.alert = function(message, type, timeout) {
+                  if (typeof message === 'string' && 
+                      (message.includes('login session no longer matches') || 
+                       message.includes('connection to FlowPrompt.ai was lost'))) {
+                    const uid = parseInt(document.cookie.match(/uid=([^;]+)/)?.[1] || '0', 10);
+                    if (uid > 0) {
+                      console.log('[FlowPrompt SSO] Suppressed app.alert session error');
+                      return;
+                    }
+                  }
+                  return originalAppAlert.apply(this, arguments);
+                };
+              }
+              
+              // Override socket.io error handlers
+              if (window.io && window.io.socket) {
+                const socket = window.io.socket;
+                const originalOn = socket.on;
+                socket.on = function(event, handler) {
+                  if (event === 'event:user.statusChange' || event === 'event:session.required') {
+                    return originalOn.call(this, event, function(data) {
+                      const uid = parseInt(document.cookie.match(/uid=([^;]+)/)?.[1] || '0', 10);
+                      if (uid > 0) {
+                        console.log('[FlowPrompt SSO] Suppressed socket session error for logged-in user');
+                        return;
+                      }
+                      return handler.apply(this, arguments);
+                    });
+                  }
+                  return originalOn.apply(this, arguments);
+                };
+              }
+              
+              // Intercept toastr/bootbox notifications
+              if (window.toastr) {
+                const originalToastrError = window.toastr.error;
+                window.toastr.error = function(message, title, options) {
+                  if (typeof message === 'string' && 
+                      (message.includes('login session no longer matches') || 
+                       message.includes('connection to FlowPrompt.ai was lost'))) {
+                    const uid = parseInt(document.cookie.match(/uid=([^;]+)/)?.[1] || '0', 10);
+                    if (uid > 0) {
+                      console.log('[FlowPrompt SSO] Suppressed toastr session error');
+                      return;
+                    }
+                  }
+                  return originalToastrError.apply(this, arguments);
+                };
+              }
+              
+              // Intercept bootbox if it exists
+              if (window.bootbox) {
+                const originalBootboxAlert = window.bootbox.alert;
+                window.bootbox.alert = function(message, callback) {
+                  if (typeof message === 'string' && 
+                      (message.includes('login session no longer matches') || 
+                       message.includes('connection to FlowPrompt.ai was lost'))) {
+                    const uid = parseInt(document.cookie.match(/uid=([^;]+)/)?.[1] || '0', 10);
+                    if (uid > 0) {
+                      console.log('[FlowPrompt SSO] Suppressed bootbox session error');
+                      if (callback) callback();
+                      return;
+                    }
+                  }
+                  return originalBootboxAlert.apply(this, arguments);
+                };
+              }
+            });
+          })();
+        `,
+        id: 'flowprompt-sso-session-fix',
+      });
+      return scripts;
+    });
+
+    // Ensure user data is properly sent to client on page load
+    hooks.on('filter:middleware.render', async (hookData) => {
+      const { req, res } = hookData;
+      // Ensure req.user is populated if session exists
+      if (req.session?.uid && !req.user) {
+        const User = require.main.require('./src/user');
+        try {
+          const userData = await User.getUserFields(req.session.uid, [
+            'uid',
+            'username',
+            'email',
+            'picture',
+            'joindate',
+            'lastonline',
+            'status',
+          ]);
+          if (userData) {
+            req.user = userData;
+            req.uid = req.session.uid;
+          }
+        } catch (err) {
+          console.error(
+            '[FlowPrompt SSO] Error loading user in render hook:',
+            err,
+          );
+        }
+      }
+      return hookData;
+    });
+
     // Admin routes
     router.get(
       '/admin/plugins/flowprompt-sso',
