@@ -61,14 +61,70 @@ const Plugin = {
     // The session middleware should already be running globally, but we ensure it's active
     router.get('/sso/jwt', middleware.maintenanceMode, self.handleSSO);
 
+    // CRITICAL: Add middleware to ensure user is loaded from session on all requests
+    // NodeBB's authentication middleware should do this, but we ensure it happens
+    // This must be registered BEFORE other routes so it runs on all requests
+    router.use(async (req, res, next) => {
+      // Only process if session has UID but req.user is not set
+      if (req.session?.uid && !req.user) {
+        const User = require.main.require('./src/user');
+        try {
+          const userData = await User.getUserFields(req.session.uid, [
+            'uid',
+            'username',
+            'email',
+            'picture',
+            'joindate',
+            'lastonline',
+            'status',
+          ]);
+          if (userData) {
+            req.user = userData;
+            req.uid = req.session.uid;
+            console.log(
+              `[FlowPrompt SSO] Middleware: Loaded user ${req.session.uid} from session`,
+            );
+          }
+        } catch (err) {
+          console.error(
+            '[FlowPrompt SSO] Middleware: Error loading user:',
+            err,
+          );
+        }
+      }
+      next();
+    });
+
     // Debug route to inspect session after redirect
-    router.get('/sso/session-debug', (req, res) => {
+    router.get('/sso/session-debug', async (req, res) => {
+      // Try to manually load user if session has UID but req.user is not set
+      if (req.session?.uid && !req.user) {
+        const User = require.main.require('./src/user');
+        try {
+          const userData = await User.getUserFields(req.session.uid, [
+            'uid',
+            'username',
+            'email',
+          ]);
+          if (userData) {
+            req.user = userData;
+            req.uid = req.session.uid;
+            console.log(
+              `[FlowPrompt SSO] Debug: Manually loaded user ${req.session.uid}`,
+            );
+          }
+        } catch (err) {
+          console.error('[FlowPrompt SSO] Debug: Error loading user:', err);
+        }
+      }
+
       return res.json({
         sessionId: req.sessionID,
         sessionUid: req.session?.uid || null,
         reqUid: req.uid || null,
         reqUser: req.user || null,
         cookies: req.cookies,
+        manuallyLoaded: req.user ? 'yes' : 'no',
       });
     });
 
