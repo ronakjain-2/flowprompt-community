@@ -464,9 +464,35 @@ const Plugin = {
       req.secure ||
       false;
 
-    // IMPORTANT: Let express-session handle the cookie automatically
-    // Don't manually set it as that can interfere with express-session's cookie handling
-    // The session.save() call above will trigger express-session to set the cookie
+    // CRITICAL: Explicitly set the session cookie to ensure it's sent
+    // express-session should handle this, but we need to ensure the cookie domain is correct
+    // Get the session cookie options from express-session
+    const sessionCookieOptions = req.sessionStore?.cookie || {};
+
+    // Build cookie options matching NodeBB's configuration
+    const cookieOptions = {
+      httpOnly: sessionCookieOptions.httpOnly !== false,
+      secure: isSecure,
+      sameSite: sessionCookieOptions.sameSite || 'lax',
+      path: sessionCookieOptions.path || '/',
+    };
+
+    // Set cookie domain if configured in NodeBB
+    if (cookieDomain) {
+      cookieOptions.domain = cookieDomain;
+      console.log(`[FlowPrompt SSO] Setting cookie domain to: ${cookieDomain}`);
+    } else {
+      console.log(
+        '[FlowPrompt SSO] Cookie domain not set - using default (current domain)',
+      );
+    }
+
+    // Explicitly set the cookie with the session ID
+    // This ensures the cookie is definitely in the response
+    res.cookie(cookieName, req.sessionID, cookieOptions);
+    console.log(
+      `[FlowPrompt SSO] Explicitly set cookie: ${cookieName}=${req.sessionID}`,
+    );
 
     // Verify session is set correctly
     console.log(`[FlowPrompt SSO] Created session for user: ${uid}`);
@@ -603,31 +629,21 @@ const Plugin = {
         .replace(/'/g, "\\'")
         .replace(/"/g, '&quot;');
 
-      // Send HTML page that ensures cookie is set before redirect
-      const html = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta http-equiv="X-UA-Compatible" content="IE=edge">
-  <title>Redirecting...</title>
-  <script>
-    // Small delay to ensure cookie is set before redirect
-    setTimeout(function() {
-      window.location.href = '${escapedRedirectPath}';
-    }, 100);
-  </script>
-</head>
-<body>
-  <p>Redirecting to forum...</p>
-  <p>If you are not redirected automatically, <a href="${escapedRedirectPath}">click here</a>.</p>
-</body>
-</html>`;
+      // Instead of HTML redirect, use a standard HTTP redirect
+      // The cookie should already be set in the response headers
+      // This is more reliable and allows NodeBB's middleware to run properly
+      console.log(
+        `[FlowPrompt SSO] Sending HTTP redirect with session cookie...`,
+      );
 
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      // Set no-cache headers
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.setHeader('Pragma', 'no-cache');
       res.setHeader('Expires', '0');
-      return res.send(html);
+
+      // Use 302 redirect - this ensures the cookie is sent with the redirect
+      // NodeBB's middleware will run on the redirected page and load the session
+      return res.redirect(302, redirectPath);
     } catch (err) {
       console.error('[FlowPrompt SSO] SSO error:', err);
       return res.status(401).render('500', {
