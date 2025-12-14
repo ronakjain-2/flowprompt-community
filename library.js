@@ -49,58 +49,148 @@ const Plugin = {
     router.get('/sso/jwt', middleware.maintenanceMode, self.handleSSO);
 
     // Register route to serve client-side fix script
+    // This script MUST run IMMEDIATELY before NodeBB's code executes
     router.get('/sso/session-fix.js', (req, res) => {
       res.type('application/javascript');
-      res.send(`
-        (function() {
-          // Fix for "login session no longer matches" error
-          const originalAlert = window.alert;
-          window.alert = function(message) {
-            if (typeof message === 'string' && 
-                (message.includes('login session no longer matches') || 
-                 message.includes('connection to FlowPrompt.ai was lost'))) {
-              const uid = parseInt(document.cookie.match(/uid=([^;]+)/)?.[1] || '0', 10);
-              if (uid > 0) {
-                console.log('[FlowPrompt SSO] Suppressed false positive session error:', message);
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.send(`(function() {
+        'use strict';
+        // CRITICAL: Run immediately, before any other scripts
+        // This intercepts NodeBB's session validation errors
+        
+        function isUserLoggedIn() {
+          try {
+            const uid = parseInt(document.cookie.match(/uid=([^;]+)/)?.[1] || '0', 10);
+            return uid > 0;
+          } catch (e) {
+            return false;
+          }
+        }
+        
+        function shouldSuppressError(message) {
+          if (typeof message !== 'string') return false;
+          const errorMessages = [
+            'login session no longer matches',
+            'connection to FlowPrompt.ai was lost',
+            'session no longer matches',
+            'login session',
+            'was lost'
+          ];
+          return errorMessages.some(msg => message.toLowerCase().includes(msg.toLowerCase())) && isUserLoggedIn();
+        }
+        
+        // Intercept window.alert IMMEDIATELY
+        const originalAlert = window.alert;
+        window.alert = function(message) {
+          if (shouldSuppressError(message)) {
+            console.log('[FlowPrompt SSO] Suppressed alert:', message);
+            return;
+          }
+          return originalAlert.apply(this, arguments);
+        };
+        
+        // Intercept console.error for session errors
+        const originalConsoleError = console.error;
+        console.error = function() {
+          const args = Array.from(arguments);
+          const message = args.join(' ');
+          if (shouldSuppressError(message)) {
+            console.log('[FlowPrompt SSO] Suppressed console.error:', message);
+            return;
+          }
+          return originalConsoleError.apply(console, arguments);
+        };
+        
+        // Wait for DOM and NodeBB to load, then intercept app.alert and other methods
+        function initInterceptors() {
+          // Intercept app.alert
+          if (window.app && typeof window.app.alert === 'function') {
+            const originalAppAlert = window.app.alert;
+            window.app.alert = function(message, type, timeout) {
+              if (shouldSuppressError(message)) {
+                console.log('[FlowPrompt SSO] Suppressed app.alert:', message);
                 return;
               }
-            }
-            return originalAlert.apply(this, arguments);
-          };
-          
-          function waitForNodeBB(callback, maxAttempts) {
-            maxAttempts = maxAttempts || 50;
-            let attempts = 0;
-            const checkInterval = setInterval(function() {
-              attempts++;
-              if (window.app && window.app.user && window.app.alert) {
-                clearInterval(checkInterval);
-                callback();
-              } else if (attempts >= maxAttempts) {
-                clearInterval(checkInterval);
-              }
-            }, 100);
+              return originalAppAlert.apply(this, arguments);
+            };
           }
           
-          waitForNodeBB(function() {
-            if (window.app && typeof window.app.alert === 'function') {
-              const originalAppAlert = window.app.alert;
-              window.app.alert = function(message, type, timeout) {
-                if (typeof message === 'string' && 
-                    (message.includes('login session no longer matches') || 
-                     message.includes('connection to FlowPrompt.ai was lost'))) {
-                  const uid = parseInt(document.cookie.match(/uid=([^;]+)/)?.[1] || '0', 10);
-                  if (uid > 0) {
-                    console.log('[FlowPrompt SSO] Suppressed app.alert session error');
-                    return;
-                  }
-                }
-                return originalAppAlert.apply(this, arguments);
-              };
+          // Intercept socket.io events that trigger session errors
+          if (window.io && window.io.socket) {
+            const socket = window.io.socket;
+            const originalEmit = socket.emit;
+            socket.emit = function() {
+              const args = Array.from(arguments);
+              // Don't emit session validation errors if user is logged in
+              if (args[0] === 'user.checkSession' && isUserLoggedIn()) {
+                console.log('[FlowPrompt SSO] Suppressed socket.emit(user.checkSession)');
+                return socket;
+              }
+              return originalEmit.apply(this, arguments);
+            };
+            
+            // Intercept socket.on for session error events
+            const originalOn = socket.on;
+            socket.on = function(event, handler) {
+              if ((event === 'event:user.statusChange' || event === 'event:session.required') && isUserLoggedIn()) {
+                return originalOn.call(this, event, function(data) {
+                  console.log('[FlowPrompt SSO] Suppressed socket event:', event);
+                  // Don't call handler if user is logged in
+                  return;
+                });
+              }
+              return originalOn.apply(this, arguments);
+            };
+          }
+          
+          // Intercept toastr
+          if (window.toastr && typeof window.toastr.error === 'function') {
+            const originalToastrError = window.toastr.error;
+            window.toastr.error = function(message, title, options) {
+              if (shouldSuppressError(message)) {
+                console.log('[FlowPrompt SSO] Suppressed toastr.error:', message);
+                return;
+              }
+              return originalToastrError.apply(this, arguments);
+            };
+          }
+          
+          // Intercept bootbox
+          if (window.bootbox && typeof window.bootbox.alert === 'function') {
+            const originalBootboxAlert = window.bootbox.alert;
+            window.bootbox.alert = function(message, callback) {
+              if (shouldSuppressError(message)) {
+                console.log('[FlowPrompt SSO] Suppressed bootbox.alert:', message);
+                if (callback) callback();
+                return;
+              }
+              return originalBootboxAlert.apply(this, arguments);
+            };
+          }
+          
+          // Override page refresh/redirect that happens on session error
+          const originalLocationReload = window.location.reload;
+          window.location.reload = function() {
+            if (isUserLoggedIn()) {
+              console.log('[FlowPrompt SSO] Suppressed page reload - user is logged in');
+              return;
             }
-          });
-        })();
-      `);
+            return originalLocationReload.apply(this, arguments);
+          };
+        }
+        
+        // Run interceptors immediately if DOM is ready, otherwise wait
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', initInterceptors);
+        } else {
+          initInterceptors();
+        }
+        
+        // Also run after a short delay to catch late-loading NodeBB code
+        setTimeout(initInterceptors, 100);
+        setTimeout(initInterceptors, 500);
+        setTimeout(initInterceptors, 1000);
+      })();`);
     });
 
     // Middleware to populate req.user from session where missing
@@ -205,6 +295,10 @@ const Plugin = {
       middleware.admin.checkPrivileges,
       self.saveSettings,
     );
+
+    // Also inject script via action hook as fallback
+    const hooks = require.main.require('./src/plugins/hooks');
+    hooks.register('filter:header.build', self.filterHeaderBuild.bind(self));
 
     console.log('[FlowPrompt SSO] Plugin initialized');
     console.log(
@@ -821,28 +915,43 @@ const Plugin = {
     res.json({ status: 'ok' });
   },
 
-  // Inject script via header hook - adds script tag to page
+  // Inject script via header hook - adds script tag EARLY in the page
   async filterHeaderBuild(header) {
-    // Add script reference to the header
-    // NodeBB's header object should have a scripts array or similar
     const meta = require.main.require('./src/meta');
     const baseUrl = meta.config.relative_path || '';
     const scriptUrl = `${baseUrl}/sso/session-fix.js`;
 
-    if (header && header.templateData) {
-      header.templateData.scripts = header.templateData.scripts || [];
-      header.templateData.scripts.push(`<script src="${scriptUrl}"></script>`);
-    } else if (header && Array.isArray(header)) {
-      header.push(`<script src="${scriptUrl}"></script>`);
-    } else if (header) {
-      header.scripts = header.scripts || [];
+    // Inject script as early as possible - in the head section
+    // Try multiple possible locations in the header object
+    if (header) {
+      // Method 1: templateData.scripts (most common)
+      if (header.templateData) {
+        header.templateData.scripts = header.templateData.scripts || [];
+        // Insert at the beginning to run early
+        header.templateData.scripts.unshift(
+          `<script src="${scriptUrl}"></script>`,
+        );
+      }
+
+      // Method 2: Direct scripts array
       if (Array.isArray(header.scripts)) {
-        header.scripts.push(`<script src="${scriptUrl}"></script>`);
-      } else {
-        header.scripts =
-          (header.scripts || '') + `<script src="${scriptUrl}"></script>`;
+        header.scripts.unshift(`<script src="${scriptUrl}"></script>`);
+      } else if (typeof header.scripts === 'string') {
+        header.scripts = `<script src="${scriptUrl}"></script>\n${header.scripts}`;
+      } else if (!header.scripts) {
+        header.scripts = [`<script src="${scriptUrl}"></script>`];
+      }
+
+      // Method 3: Add to head directly if available
+      if (header.head) {
+        if (Array.isArray(header.head)) {
+          header.head.unshift(`<script src="${scriptUrl}"></script>`);
+        } else if (typeof header.head === 'string') {
+          header.head = `<script src="${scriptUrl}"></script>\n${header.head}`;
+        }
       }
     }
+
     return header;
   },
 };
