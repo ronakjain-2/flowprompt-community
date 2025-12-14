@@ -6,6 +6,8 @@ const db = require.main.require('./src/database');
 
 const FlowPromptSSO = {};
 
+/* ---------------- JWKS ---------------- */
+
 const jwks = jwksClient({
   jwksUri: 'https://api.flowprompt.ai/.well-known/jwks.json',
   cache: true,
@@ -22,20 +24,25 @@ function getKey(header, callback) {
   });
 }
 
-FlowPromptSSO.init = async function () {
+/* ---------------- INIT ---------------- */
+
+FlowPromptSSO.init = async function ({ app, middleware }) {
   console.log('[FlowPrompt SSO] Plugin initialized');
-};
 
-FlowPromptSSO.addRoutes = async function ({ router, middleware, controllers }) {
-  console.log('[FlowPrompt SSO] Registering SSO routes');
-
-  router.get('/sso/jwt', middleware.buildHeader, FlowPromptSSO.handleJWT);
-  router.get(
+  // KEEP ROUTE EXACTLY THE SAME
+  app.get('/sso/jwt', middleware.buildHeader, FlowPromptSSO.handleJWT);
+  app.get(
     '/sso/session-debug',
     middleware.buildHeader,
     FlowPromptSSO.debugSession,
   );
+
+  console.log(
+    '[FlowPrompt SSO] Routes registered: /sso/jwt, /sso/session-debug',
+  );
 };
+
+/* ---------------- JWT HANDLER ---------------- */
 
 FlowPromptSSO.handleJWT = async function (req, res) {
   try {
@@ -64,12 +71,13 @@ FlowPromptSSO.handleJWT = async function (req, res) {
       return res.status(400).send('Invalid token');
     }
 
+    // Map external user → NodeBB uid
     let uid = await db.getObjectField('flowprompt:uid', externalId);
 
     if (!uid) {
       uid = await User.create({
         username: username || name || `fp_${externalId}`,
-        email,
+        email: email || undefined,
         fullname: name || '',
         picture: picture || null,
       });
@@ -80,11 +88,14 @@ FlowPromptSSO.handleJWT = async function (req, res) {
         await User.setUserField(uid, 'email', email);
         await User.setUserField(uid, 'email:confirmed', 1);
       }
+
+      console.log('[FlowPrompt SSO] Created user:', uid);
     }
 
-    // ✅ Correct NodeBB login
+    // Log the user into NodeBB
     req.session.uid = uid;
 
+    // Optional helper cookie (safe)
     res.cookie('uid', uid, {
       domain: '.flowprompt.ai',
       path: '/',
@@ -93,13 +104,14 @@ FlowPromptSSO.handleJWT = async function (req, res) {
     });
 
     console.log('[FlowPrompt SSO] Logged in UID:', uid);
-
     return res.redirect(redirect);
   } catch (err) {
     console.error('[FlowPrompt SSO] JWT error:', err.message);
     return res.status(400).send(err.message);
   }
 };
+
+/* ---------------- DEBUG ---------------- */
 
 FlowPromptSSO.debugSession = async function (req, res) {
   const uid = req.session?.uid || null;

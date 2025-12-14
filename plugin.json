@@ -8,10 +8,6 @@
     {
       "hook": "static:app.load",
       "method": "init"
-    },
-    {
-      "hook": "static:api.routes",
-      "method": "addRoutes"
     }
   ]
 }
