@@ -115,8 +115,19 @@ const Plugin = {
         
         // Intercept socket.io at multiple levels
         function interceptSocketIO() {
+          let socketFound = false;
+          
+          // Debug: Log what's available
+          console.log('[FlowPrompt SSO] Checking for socket.io...');
+          console.log('[FlowPrompt SSO] window.io:', typeof window.io, window.io);
+          console.log('[FlowPrompt SSO] window.app:', typeof window.app, window.app);
+          if (window.app) {
+            console.log('[FlowPrompt SSO] window.app.socket:', window.app.socket);
+          }
+          
           // Method 1: Intercept io() function itself
           if (window.io && typeof window.io === 'function') {
+            console.log('[FlowPrompt SSO] Found window.io as function, wrapping...');
             const originalIO = window.io;
             window.io = function() {
               const socket = originalIO.apply(this, arguments);
@@ -127,49 +138,135 @@ const Plugin = {
             Object.keys(originalIO).forEach(key => {
               window.io[key] = originalIO[key];
             });
+            socketFound = true;
           }
           
-          // Method 2: Intercept existing socket instances
+          // Method 2: Intercept existing socket instances (window.io.socket)
           if (window.io && window.io.socket) {
+            console.log('[FlowPrompt SSO] Found window.io.socket, wrapping...');
             wrapSocket(window.io.socket);
+            socketFound = true;
           }
           
           // Method 3: Intercept app.socket if it exists
           if (window.app && window.app.socket) {
+            console.log('[FlowPrompt SSO] Found window.app.socket, wrapping...');
             wrapSocket(window.app.socket);
+            socketFound = true;
           }
           
-          // Method 4: Wait for socket to be created and intercept it
+          // Method 4: Check for socket in app object (NodeBB might store it differently)
+          if (window.app && typeof window.app === 'object') {
+            // Check all properties that might be socket
+            Object.keys(window.app).forEach(key => {
+              const value = window.app[key];
+              if (value && typeof value === 'object' && typeof value.emit === 'function' && typeof value.on === 'function') {
+                console.log('[FlowPrompt SSO] Found socket-like object at window.app.' + key, 'wrapping...');
+                wrapSocket(value);
+                socketFound = true;
+              }
+            });
+          }
+          
+          // Method 5: Check for socket in require.js modules (NodeBB uses AMD)
+          if (window.require && typeof window.require === 'function') {
+            try {
+              // Try to get socket from require cache
+              if (window.require.cache) {
+                Object.keys(window.require.cache).forEach(moduleId => {
+                  if (moduleId.includes('socket') || moduleId.includes('io')) {
+                    const module = window.require.cache[moduleId];
+                    if (module && module.exports) {
+                      const exp = module.exports;
+                      if (exp && typeof exp.emit === 'function') {
+                        console.log('[FlowPrompt SSO] Found socket in require cache:', moduleId, 'wrapping...');
+                        wrapSocket(exp);
+                        socketFound = true;
+                      }
+                    }
+                  }
+                });
+              }
+            } catch (e) {
+              // require.cache might not be accessible
+            }
+          }
+          
+          // Method 6: Aggressively poll for socket to be created
+          let pollCount = 0;
+          const maxPolls = 100; // 10 seconds at 100ms intervals
           const checkForSocket = setInterval(function() {
+            pollCount++;
+            
+            // Check window.io.socket
             if (window.io && window.io.socket && !window.io.socket._flowpromptWrapped) {
+              console.log('[FlowPrompt SSO] Found window.io.socket during polling, wrapping...');
               wrapSocket(window.io.socket);
+              socketFound = true;
+            }
+            
+            // Check app.socket
+            if (window.app && window.app.socket && !window.app.socket._flowpromptWrapped) {
+              console.log('[FlowPrompt SSO] Found window.app.socket during polling, wrapping...');
+              wrapSocket(window.app.socket);
+              socketFound = true;
+            }
+            
+            // Check if app object gets socket property added
+            if (window.app && typeof window.app === 'object') {
+              Object.keys(window.app).forEach(key => {
+                const value = window.app[key];
+                if (value && typeof value === 'object' && typeof value.emit === 'function' && !value._flowpromptWrapped) {
+                  console.log('[FlowPrompt SSO] Found new socket-like object at window.app.' + key, 'wrapping...');
+                  wrapSocket(value);
+                  socketFound = true;
+                }
+              });
+            }
+            
+            // Stop if we found socket or max polls reached
+            if (socketFound && pollCount > 5) {
               clearInterval(checkForSocket);
             }
-            if (window.app && window.app.socket && !window.app.socket._flowpromptWrapped) {
-              wrapSocket(window.app.socket);
+            if (pollCount >= maxPolls) {
+              if (!socketFound) {
+                console.warn('[FlowPrompt SSO] Socket.io not found after polling. NodeBB might use a different socket structure.');
+              }
               clearInterval(checkForSocket);
             }
           }, 100);
-          
-          // Stop checking after 10 seconds
-          setTimeout(() => clearInterval(checkForSocket), 10000);
         }
         
         function wrapSocket(socket) {
           if (!socket || socket._flowpromptWrapped) return;
           socket._flowpromptWrapped = true;
           
-          console.log('[FlowPrompt SSO] Wrapping socket.io instance');
+          console.log('[FlowPrompt SSO] Wrapping socket.io instance', socket);
           
-          // Intercept emit
+          // Intercept emit - log all emits for debugging
           if (typeof socket.emit === 'function') {
             const originalEmit = socket.emit.bind(socket);
             socket.emit = function() {
               const args = Array.from(arguments);
               const eventName = args[0];
               
+              // Log all emits for debugging (only first few times)
+              if (!socket._flowpromptEmitCount) socket._flowpromptEmitCount = 0;
+              if (socket._flowpromptEmitCount < 10) {
+                console.log('[FlowPrompt SSO] Socket emit:', eventName, args.slice(1));
+                socket._flowpromptEmitCount++;
+              }
+              
               // Suppress session check if user is logged in
-              if ((eventName === 'user.checkSession' || eventName === 'user.validateSession') && isUserLoggedIn()) {
+              const sessionCheckEvents = [
+                'user.checkSession',
+                'user.validateSession',
+                'user.check',
+                'session.check',
+                'auth.check'
+              ];
+              
+              if (sessionCheckEvents.some(e => eventName === e || eventName.includes('Session') || eventName.includes('session')) && isUserLoggedIn()) {
                 console.log('[FlowPrompt SSO] Suppressed socket.emit:', eventName);
                 return socket;
               }
@@ -178,11 +275,18 @@ const Plugin = {
             };
           }
           
-          // Intercept on/once/addEventListener
+          // Intercept on/once/addEventListener - log all event registrations
           ['on', 'once', 'addEventListener'].forEach(method => {
             if (typeof socket[method] === 'function') {
               const originalMethod = socket[method].bind(socket);
               socket[method] = function(event, handler) {
+                // Log event registrations for debugging
+                if (!socket._flowpromptEventCount) socket._flowpromptEventCount = 0;
+                if (socket._flowpromptEventCount < 20 && typeof event === 'string') {
+                  console.log('[FlowPrompt SSO] Socket event listener registered:', event);
+                  socket._flowpromptEventCount++;
+                }
+                
                 // Intercept session error events
                 if (typeof event === 'string' && typeof handler === 'function') {
                   const errorEvents = [
@@ -190,10 +294,21 @@ const Plugin = {
                     'event:session.required',
                     'event:user.loggedOut',
                     'event:session.invalid',
-                    'disconnect'
+                    'event:user.status',
+                    'event:session',
+                    'disconnect',
+                    'error',
+                    'reconnect_error',
+                    'reconnect_failed'
                   ];
                   
-                  if (errorEvents.includes(event) && isUserLoggedIn()) {
+                  // Check if event name contains session-related keywords
+                  const isSessionEvent = errorEvents.includes(event) || 
+                    event.toLowerCase().includes('session') ||
+                    event.toLowerCase().includes('login') ||
+                    event.toLowerCase().includes('auth');
+                  
+                  if (isSessionEvent && isUserLoggedIn()) {
                     console.log('[FlowPrompt SSO] Intercepting socket event listener:', event);
                     return originalMethod.call(this, event, function(data) {
                       console.log('[FlowPrompt SSO] Suppressed socket event:', event, data);
@@ -212,16 +327,31 @@ const Plugin = {
           if (socket.io && socket.io.on) {
             const originalIOOn = socket.io.on.bind(socket.io);
             socket.io.on = function(event, handler) {
-              if (event === 'error' || event === 'disconnect') {
+              if ((event === 'error' || event === 'disconnect' || event === 'reconnect_error') && isUserLoggedIn()) {
                 return originalIOOn.call(this, event, function(data) {
-                  if (isUserLoggedIn()) {
-                    console.log('[FlowPrompt SSO] Suppressed socket.io error/disconnect:', event);
-                    return;
-                  }
-                  return handler.apply(this, arguments);
+                  console.log('[FlowPrompt SSO] Suppressed socket.io error/disconnect:', event, data);
+                  return;
                 });
               }
               return originalIOOn.apply(this, arguments);
+            };
+          }
+          
+          // Also intercept any 'on' method on the socket itself for error events
+          if (socket.on && typeof socket.on === 'function') {
+            const originalOn = socket.on.bind(socket);
+            socket.on = function(event, handler) {
+              if (typeof event === 'string' && typeof handler === 'function') {
+                const errorEvents = ['error', 'disconnect', 'reconnect_error', 'reconnect_failed'];
+                if (errorEvents.includes(event) && isUserLoggedIn()) {
+                  console.log('[FlowPrompt SSO] Intercepting socket.on error event:', event);
+                  return originalOn.call(this, event, function(data) {
+                    console.log('[FlowPrompt SSO] Suppressed socket.on error:', event, data);
+                    return;
+                  });
+                }
+              }
+              return originalOn.apply(this, arguments);
             };
           }
         }
@@ -257,17 +387,81 @@ const Plugin = {
             };
           }
           
-          // Intercept bootbox
-          if (window.bootbox && typeof window.bootbox.alert === 'function') {
-            const originalBootboxAlert = window.bootbox.alert;
-            window.bootbox.alert = function(message, callback) {
-              if (shouldSuppressError(message)) {
-                console.log('[FlowPrompt SSO] Suppressed bootbox.alert:', message);
-                if (callback) callback();
-                return;
-              }
-              return originalBootboxAlert.apply(this, arguments);
-            };
+          // Intercept bootbox - handle both direct access and require.js access
+          try {
+            if (window.bootbox && typeof window.bootbox.alert === 'function') {
+              const originalBootboxAlert = window.bootbox.alert;
+              window.bootbox.alert = function(message, callback) {
+                if (shouldSuppressError(message)) {
+                  console.log('[FlowPrompt SSO] Suppressed bootbox.alert:', message);
+                  if (callback) callback();
+                  return;
+                }
+                return originalBootboxAlert.apply(this, arguments);
+              };
+            }
+            
+            // Also intercept via require.js if available
+            if (window.require && typeof window.require === 'function') {
+              const originalRequire = window.require;
+              window.require = function() {
+                const result = originalRequire.apply(this, arguments);
+                // If bootbox is required, wrap it
+                if (arguments[0] && Array.isArray(arguments[0]) && arguments[0].includes('bootbox')) {
+                  const callback = arguments[1];
+                  if (typeof callback === 'function') {
+                    return originalRequire.call(this, arguments[0], function() {
+                      const bootbox = arguments[0];
+                      if (bootbox && typeof bootbox.alert === 'function') {
+                        const originalBootboxAlert = bootbox.alert;
+                        bootbox.alert = function(message, cb) {
+                          if (shouldSuppressError(message)) {
+                            console.log('[FlowPrompt SSO] Suppressed bootbox.alert (via require):', message);
+                            if (cb) cb();
+                            return;
+                          }
+                          return originalBootboxAlert.apply(this, arguments);
+                        };
+                      }
+                      return callback.apply(this, arguments);
+                    });
+                  }
+                }
+                return result;
+              };
+            }
+          } catch (e) {
+            console.log('[FlowPrompt SSO] Error intercepting bootbox:', e);
+          }
+          
+          // Intercept any DOM mutations that might add error messages
+          if (window.MutationObserver) {
+            const observer = new MutationObserver(function(mutations) {
+              mutations.forEach(function(mutation) {
+                mutation.addedNodes.forEach(function(node) {
+                  if (node.nodeType === 1) { // Element node
+                    const text = node.textContent || node.innerText || '';
+                    if (shouldSuppressError(text)) {
+                      console.log('[FlowPrompt SSO] Detected error message in DOM:', text);
+                      // Try to remove or hide the error element
+                      if (node.style) {
+                        node.style.display = 'none';
+                      }
+                      if (node.parentNode && node.parentNode.style) {
+                        node.parentNode.style.display = 'none';
+                      }
+                    }
+                  }
+                });
+              });
+            });
+            
+            observer.observe(document.body || document.documentElement, {
+              childList: true,
+              subtree: true
+            });
+            
+            console.log('[FlowPrompt SSO] DOM mutation observer started');
           }
           
           // Intercept jQuery ajaxError if available (NodeBB might use this)
@@ -365,6 +559,33 @@ const Plugin = {
           }
         }
         
+        // Global error message logger - helps identify what error messages appear
+        window._flowpromptErrorLogger = {
+          messages: [],
+          log: function(message, source) {
+            this.messages.push({ message: message, source: source, time: new Date().toISOString() });
+            console.log('[FlowPrompt SSO] Error message detected:', message, 'from:', source);
+            // Keep only last 20 messages
+            if (this.messages.length > 20) {
+              this.messages.shift();
+            }
+          }
+        };
+        
+        // Override common error display methods to log messages
+        const logError = function(message, source) {
+          if (typeof message === 'string' && message.length > 0) {
+            window._flowpromptErrorLogger.log(message, source);
+          }
+        };
+        
+        // Wrap alert one more time to log
+        const originalAlert2 = window.alert;
+        window.alert = function(message) {
+          logError(String(message), 'window.alert');
+          return originalAlert2.apply(this, arguments);
+        };
+        
         // Run interceptors immediately
         initInterceptors();
         
@@ -379,6 +600,13 @@ const Plugin = {
         setTimeout(initInterceptors, 500);
         setTimeout(initInterceptors, 1000);
         setTimeout(initInterceptors, 2000);
+        
+        // Final check after page fully loads
+        window.addEventListener('load', function() {
+          console.log('[FlowPrompt SSO] Page fully loaded, running final interceptor check');
+          setTimeout(initInterceptors, 100);
+          setTimeout(initInterceptors, 500);
+        });
       })();`);
     });
 
