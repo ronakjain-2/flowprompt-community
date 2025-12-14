@@ -75,7 +75,8 @@ plugin.init = async function ({ router, middleware }) {
 
       if (!uid) {
         uid = await User.create({
-          username: payload.name || payload.email.split('@')[0],
+          username:
+            payload.username || payload.email.split('@')[0] || payload.name,
           email: payload.email,
         });
 
