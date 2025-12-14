@@ -4,15 +4,16 @@ const jwksClient = require('jwks-rsa');
 const User = require.main.require('./src/user');
 const db = require.main.require('./src/database');
 
-const client = jwksClient({
+const FlowPromptSSO = {};
+
+const jwks = jwksClient({
   jwksUri: 'https://api.flowprompt.ai/.well-known/jwks.json',
   cache: true,
-  cacheMaxEntries: 5,
-  cacheMaxAge: 10 * 60 * 1000,
+  rateLimit: true,
 });
 
 function getKey(header, callback) {
-  client.getSigningKey(header.kid, (err, key) => {
+  jwks.getSigningKey(header.kid, (err, key) => {
     if (err) {
       return callback(err);
     }
@@ -21,13 +22,13 @@ function getKey(header, callback) {
   });
 }
 
-const FlowPromptSSO = {};
-
 FlowPromptSSO.init = async function () {
   console.log('[FlowPrompt SSO] Plugin initialized');
 };
 
-FlowPromptSSO.addRoutes = async function ({ router, middleware }) {
+FlowPromptSSO.addRoutes = async function ({ router, middleware, controllers }) {
+  console.log('[FlowPrompt SSO] Registering SSO routes');
+
   router.get('/sso/jwt', middleware.buildHeader, FlowPromptSSO.handleJWT);
   router.get(
     '/sso/session-debug',
@@ -60,7 +61,7 @@ FlowPromptSSO.handleJWT = async function (req, res) {
     const { uid: externalId, email, username, name, picture } = decoded;
 
     if (!externalId) {
-      return res.status(400).send('Invalid token payload');
+      return res.status(400).send('Invalid token');
     }
 
     let uid = await db.getObjectField('flowprompt:uid', externalId);
@@ -68,7 +69,7 @@ FlowPromptSSO.handleJWT = async function (req, res) {
     if (!uid) {
       uid = await User.create({
         username: username || name || `fp_${externalId}`,
-        email: email || undefined,
+        email,
         fullname: name || '',
         picture: picture || null,
       });
@@ -81,7 +82,7 @@ FlowPromptSSO.handleJWT = async function (req, res) {
       }
     }
 
-    // ✅ This is ALL that is needed
+    // ✅ Correct NodeBB login
     req.session.uid = uid;
 
     res.cookie('uid', uid, {
@@ -91,7 +92,7 @@ FlowPromptSSO.handleJWT = async function (req, res) {
       sameSite: 'None',
     });
 
-    console.log('[FlowPrompt SSO] Login successful for UID:', uid);
+    console.log('[FlowPrompt SSO] Logged in UID:', uid);
 
     return res.redirect(redirect);
   } catch (err) {
@@ -101,23 +102,20 @@ FlowPromptSSO.handleJWT = async function (req, res) {
 };
 
 FlowPromptSSO.debugSession = async function (req, res) {
-  const uid = req.session?.uid;
+  const uid = req.session?.uid || null;
 
-  let user = null;
-
-  if (uid) {
-    user = await User.getUserFields(uid, [
-      'uid',
-      'username',
-      'email',
-      'email:confirmed',
-      'fullname',
-    ]);
-  }
+  const user = uid
+    ? await User.getUserFields(uid, [
+        'uid',
+        'username',
+        'email',
+        'email:confirmed',
+      ])
+    : null;
 
   res.json({
-    sessionUid: uid || null,
-    reqUser: user,
+    sessionUid: uid,
+    user,
     cookies: req.cookies,
   });
 };
