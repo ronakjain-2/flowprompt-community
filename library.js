@@ -1,6 +1,5 @@
 // library.js - FlowPrompt SSO plugin (updated)
 // Fixes: robust nonce TTL, explicit cookie attribute overwrite (SameSite=None), uid cookie set, session cookie overwrite
-'use strict';
 
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
@@ -168,15 +167,9 @@ const Plugin = {
             };
           }
           
-          // Override page refresh/redirect that happens on session error
-          const originalLocationReload = window.location.reload;
-          window.location.reload = function() {
-            if (isUserLoggedIn()) {
-              console.log('[FlowPrompt SSO] Suppressed page reload - user is logged in');
-              return;
-            }
-            return originalLocationReload.apply(this, arguments);
-          };
+          // Note: window.location.reload is read-only and cannot be overridden
+          // Instead, we prevent reloads by intercepting the socket events and error handlers
+          // that trigger them (see socket.emit and socket.on interceptors above)
         }
         
         // Run interceptors immediately if DOM is ready, otherwise wait
@@ -195,6 +188,7 @@ const Plugin = {
 
     // Middleware to populate req.user from session where missing
     const SSO_PROCESSED = Symbol('flowpromptSSOProcessed');
+
     router.use(async (req, res, next) => {
       if (req[SSO_PROCESSED] || req.user) return next();
 
@@ -210,6 +204,7 @@ const Plugin = {
       if (req.session?.uid && !req.user) {
         req[SSO_PROCESSED] = true;
         const User = require.main.require('./src/user');
+
         try {
           const userData = await User.getUserFields(req.session.uid, [
             'uid',
@@ -220,17 +215,20 @@ const Plugin = {
             'lastonline',
             'status',
           ]);
+
           if (userData) {
             req.user = userData;
             req.uid = req.session.uid;
             if (!global._flowpromptSSOLoggedSessions) {
               global._flowpromptSSOLoggedSessions = new Set();
             }
+
             if (!global._flowpromptSSOLoggedSessions.has(req.sessionID)) {
               global._flowpromptSSOLoggedSessions.add(req.sessionID);
               if (global._flowpromptSSOLoggedSessions.size > 100) {
                 global._flowpromptSSOLoggedSessions.clear();
               }
+
               console.log(
                 `[FlowPrompt SSO] Middleware: Loaded user ${req.session.uid} from session`,
               );
@@ -251,12 +249,14 @@ const Plugin = {
     router.get('/sso/session-debug', async (req, res) => {
       if (req.session?.uid && !req.user) {
         const User = require.main.require('./src/user');
+
         try {
           const userData = await User.getUserFields(req.session.uid, [
             'uid',
             'username',
             'email',
           ]);
+
           if (userData) {
             req.user = userData;
             req.uid = req.session.uid;
@@ -298,6 +298,7 @@ const Plugin = {
 
     // Also inject script via action hook as fallback
     const hooks = require.main.require('./src/plugins/hooks');
+
     hooks.register('filter:header.build', self.filterHeaderBuild.bind(self));
 
     console.log('[FlowPrompt SSO] Plugin initialized');
@@ -318,11 +319,13 @@ const Plugin = {
     const self = Plugin;
     const meta = require.main.require('./src/meta');
     const settings = meta.settings.get('flowprompt-sso') || {};
+
     self.config = { ...self.config, ...settings };
 
     if (self.config.flowpromptUrl && !self.config.publicKeyUrl) {
       self.config.publicKeyUrl = `${self.config.flowpromptUrl}/api/sso/public-key.pem`;
     }
+
     if (self.config.flowpromptUrl && !self.config.jwksUrl) {
       self.config.jwksUrl = `${self.config.flowpromptUrl}/.well-known/jwks.json`;
     }
@@ -336,20 +339,24 @@ const Plugin = {
       self.nonceStore = {
         async setNonce(nonce, ttl) {
           const key = `sso:nonce:${nonce}`;
+
           await db.setObject(key, { used: false, timestamp: Date.now() });
           await db.expire(key, ttl);
         },
         async consumeNonce(nonce) {
           const key = `sso:nonce:${nonce}`;
           const exists = await db.exists(key);
+
           if (exists) {
             await db.delete(key);
             return true;
           }
+
           return false;
         },
         async hasNonce(nonce) {
           const key = `sso:nonce:${nonce}`;
+
           return await db.exists(key);
         },
       };
@@ -358,11 +365,14 @@ const Plugin = {
 
       async function setNonceSafe(nonce, ttlSeconds) {
         let ttl = parseInt(ttlSeconds, 10);
+
         if (!Number.isFinite(ttl) || ttl <= 0) {
           ttl = 120;
         }
+
         store.set(nonce, Date.now());
         const ms = Math.max(1, ttl * 1000);
+
         setTimeout(() => {
           try {
             store.delete(nonce);
@@ -378,9 +388,11 @@ const Plugin = {
         },
         async consumeNonce(nonce) {
           const exists = store.has(nonce);
+
           if (exists) {
             store.delete(nonce);
           }
+
           return exists;
         },
         async hasNonce(nonce) {
@@ -392,6 +404,7 @@ const Plugin = {
 
   initJWKS() {
     const self = Plugin;
+
     self.jwksClient = jwksClient({
       jwksUri: self.config.jwksUrl,
       cache: true,
@@ -411,6 +424,7 @@ const Plugin = {
     if (self.jwksClient) {
       try {
         const key = await self.jwksClient.getSigningKey(kid);
+
         return key.getPublicKey();
       } catch (err) {
         console.error('[FlowPrompt SSO] Error fetching JWKS key:', err);
@@ -421,10 +435,13 @@ const Plugin = {
     if (self.config.publicKeyUrl) {
       try {
         const response = await fetch(self.config.publicKeyUrl);
+
         if (!response.ok) {
           throw new Error(`Failed to fetch public key: ${response.statusText}`);
         }
+
         const publicKey = await response.text();
+
         return publicKey;
       } catch (err) {
         console.error('[FlowPrompt SSO] Error fetching public key:', err);
@@ -440,9 +457,11 @@ const Plugin = {
 
     try {
       const decoded = jwt.decode(token, { complete: true });
+
       if (!decoded || !decoded.header) {
         throw new Error('Invalid token format');
       }
+
       const { kid } = decoded.header;
       const publicKey = await self.getPublicKey(kid);
       const payload = jwt.verify(token, publicKey, {
@@ -452,11 +471,13 @@ const Plugin = {
       });
 
       const nonce = payload.jti || payload.nonce;
+
       if (!nonce) {
         throw new Error('Token missing nonce (jti)');
       }
 
       const wasUsed = await self.nonceStore.hasNonce(nonce);
+
       if (wasUsed) {
         throw new Error('Token already used (replay attack detected)');
       }
@@ -475,21 +496,27 @@ const Plugin = {
     const Groups = require.main.require('./src/groups');
 
     const { email } = payload;
+
     if (!email) throw new Error('Token missing email claim');
 
     let uid = await User.getUidByEmail(email);
+
     if (uid) {
       const updateData = {};
+
       if (
         payload.name &&
         payload.name !== (await User.getUserField(uid, 'username'))
       ) {
         updateData.fullname = payload.name;
       }
+
       if (payload.picture) updateData.picture = payload.picture;
+
       if (Object.keys(updateData).length > 0) {
         await User.setUserFields(uid, updateData);
       }
+
       return uid;
     }
 
@@ -513,6 +540,7 @@ const Plugin = {
     try {
       await User.setUserField(uid, 'email', email);
       const UserEmail = require.main.require('./src/user/email');
+
       await UserEmail.confirmByUid(uid);
       console.log(
         `[FlowPrompt SSO] Email ${email} set and confirmed for user ${uid}`,
@@ -559,6 +587,7 @@ const Plugin = {
             reject(new Error('Session regenerate method not available'));
             return;
           }
+
           req.session.regenerate((err) => {
             if (err) {
               console.error('[FlowPrompt SSO] Session regenerate error:', err);
@@ -586,6 +615,7 @@ const Plugin = {
         'email',
         'picture',
       ]);
+
       if (userData) {
         req.user = userData;
         req.uid = uid;
@@ -598,6 +628,7 @@ const Plugin = {
     // This ensures express-session sets the cookie with correct SameSite=None from the start
     const meta = require.main.require('./src/meta');
     let cookieDomain = null;
+
     try {
       if (meta && meta.config && meta.config.cookieDomain) {
         cookieDomain = meta.config.cookieDomain;
@@ -605,10 +636,12 @@ const Plugin = {
     } catch (e) {}
     if (!cookieDomain) {
       try {
-        const config = require('/srv/nodebb/config.json');
+        const config = require('../../../../../../srv/nodebb/config.json');
+
         if (config && config.cookieDomain) cookieDomain = config.cookieDomain;
       } catch (e) {}
     }
+
     if (!cookieDomain) cookieDomain = '.flowprompt.ai';
 
     const isSecure =
@@ -658,6 +691,7 @@ const Plugin = {
 
     try {
       const { token } = req.query;
+
       if (!token) {
         return res
           .status(400)
@@ -666,10 +700,12 @@ const Plugin = {
 
       const payload = await self.verifyToken(token);
       const uid = await self.findOrCreateUser(payload);
+
       await self.createSession(req, res, uid);
 
       // load user data into req.user to ensure middleware compatibility
       const User = require.main.require('./src/user');
+
       try {
         const userData = await User.getUserFields(uid, [
           'uid',
@@ -680,6 +716,7 @@ const Plugin = {
           'lastonline',
           'status',
         ]);
+
         if (userData) {
           req.user = userData;
           req.uid = uid;
@@ -702,6 +739,7 @@ const Plugin = {
       if (allowedHosts.length > 0 && !redirectPath.startsWith('/')) {
         try {
           const redirectUrl = new URL(redirectPath, `https://${req.hostname}`);
+
           if (!allowedHosts.includes(redirectUrl.hostname)) {
             throw new Error('Redirect host not allowed');
           }
@@ -734,9 +772,11 @@ const Plugin = {
 
       // Hook into response to modify Set-Cookie headers before sending
       const originalEnd = res.end.bind(res);
+
       res.end = function (chunk, encoding) {
         // Get existing Set-Cookie headers
         let setCookies = res.getHeader('Set-Cookie') || [];
+
         if (!Array.isArray(setCookies)) {
           setCookies = [setCookies];
         }
@@ -756,9 +796,11 @@ const Plugin = {
             const cookieDomain = (function () {
               try {
                 const meta = require.main.require('./src/meta');
+
                 return (
                   (meta && meta.config && meta.config.cookieDomain) ||
-                  require('/srv/nodebb/config.json').cookieDomain ||
+                  require('../../../../../../srv/nodebb/config.json')
+                    .cookieDomain ||
                   '.flowprompt.ai'
                 );
               } catch (e) {
@@ -774,15 +816,18 @@ const Plugin = {
             // Rebuild cookie with SameSite=None
             return `${cookieName}=${cookieValue}; Domain=${cookieDomain}; Path=/; HttpOnly; Secure; SameSite=None`;
           }
+
           return cookie;
         });
 
         // Remove duplicates (keep only the last occurrence of each cookie name)
         const seen = new Set();
         const uniqueCookies = [];
+
         for (let i = modifiedCookies.length - 1; i >= 0; i--) {
           const cookie = modifiedCookies[i];
           const cookieNameFromHeader = cookie.split('=')[0];
+
           if (!seen.has(cookieNameFromHeader)) {
             seen.add(cookieNameFromHeader);
             uniqueCookies.unshift(cookie);
@@ -816,17 +861,21 @@ const Plugin = {
 
       // robust cookieDomain detection
       let cookieDomain = null;
+
       try {
         const meta = require.main.require('./src/meta');
+
         if (meta && meta.config && meta.config.cookieDomain)
           cookieDomain = meta.config.cookieDomain;
       } catch (e) {}
       if (!cookieDomain) {
         try {
-          const config = require('/srv/nodebb/config.json');
+          const config = require('../../../../../../srv/nodebb/config.json');
+
           if (config && config.cookieDomain) cookieDomain = config.cookieDomain;
         } catch (e) {}
       }
+
       if (!cookieDomain) cookieDomain = '.flowprompt.ai';
 
       const isSecure =
@@ -880,6 +929,7 @@ const Plugin = {
 
   async renderAdmin(req, res, next) {
     const self = Plugin;
+
     res.render('admin/plugins/flowprompt-sso', {
       title: 'FlowPrompt SSO Settings',
       config: self.config,
@@ -908,6 +958,7 @@ const Plugin = {
     if (settings.nonceStore !== self.config.nonceStore) {
       self.initNonceStore();
     }
+
     if (settings.flowpromptUrl && !settings.publicKey) {
       self.initJWKS();
     }
