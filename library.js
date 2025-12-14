@@ -1,122 +1,160 @@
 const jwt = require('jsonwebtoken');
 const jwksClient = require('jwks-rsa');
-const crypto = require('crypto');
 
 const User = require.main.require('./src/user');
-const Meta = require.main.require('./src/meta');
 const db = require.main.require('./src/database');
-const nconf = require.main.require('nconf');
+const Sessions = require.main.require('./src/sessions');
 
-const plugin = {};
+const client = jwksClient({
+  jwksUri: 'https://api.flowprompt.ai/.well-known/jwks.json',
+  cache: true,
+  cacheMaxEntries: 5,
+  cacheMaxAge: 10 * 60 * 1000,
+});
 
-let jwks = null;
-
-/**
- * INIT
- */
-plugin.init = async function ({ router, middleware }) {
-  console.log('[FlowPrompt SSO] Plugin initialized');
-
-  const settings = await Meta.settings.get('flowprompt-sso');
-
-  const apiUrl = settings.apiUrl || 'https://api.flowprompt.ai';
-  const issuer = settings.issuer || 'flowprompt';
-  const audience = settings.audience || 'nodebb';
-
-  console.log('[FlowPrompt SSO] FlowPrompt URL:', apiUrl);
-
-  jwks = jwksClient({
-    jwksUri: `${apiUrl}/.well-known/jwks.json`,
-    cache: true,
-    rateLimit: true,
-  });
-
-  router.get('/sso/jwt', middleware.buildHeader, async (req, res) => {
-    try {
-      const { token } = req.query;
-
-      if (!token) {
-        return res.status(400).send('Missing token');
-      }
-
-      const decodedHeader = jwt.decode(token, { complete: true });
-
-      if (!decodedHeader) {
-        return res.status(400).send('Invalid token');
-      }
-
-      const key = await jwks.getSigningKey(decodedHeader.header.kid);
-      const publicKey = key.getPublicKey();
-
-      const payload = jwt.verify(token, publicKey, {
-        issuer,
-        audience,
-      });
-
-      if (!payload.email) {
-        return res.status(400).send('Email missing in token');
-      }
-
-      // Nonce protection
-      const nonceKey = `flowprompt:nonce:${payload.nonce}`;
-      const used = await db.get(nonceKey);
-
-      if (used) {
-        return res.status(400).send('Nonce already used');
-      }
-
-      await db.set(nonceKey, '1');
-      await db.expire(nonceKey, 120);
-
-      // Find or create user
-      let uid = await User.getUidByEmail(payload.email);
-
-      if (!uid) {
-        uid = await User.create({
-          username: payload.name || payload.email.split('@')[0],
-          email: payload.email,
-        });
-      }
-
-      // 🔐 LOG USER IN (NodeBB native)
-      await new Promise((resolve, reject) => {
-        req.login({ uid }, (err) => (err ? reject(err) : resolve()));
-      });
-
-      // Force session save
-      req.session.uid = uid;
-      await new Promise((resolve) => req.session.save(resolve));
-
-      // Set UID cookie for cross-subdomain access
-      res.cookie('uid', uid, {
-        domain: '.flowprompt.ai',
-        secure: true,
-        sameSite: 'None',
-        path: '/',
-      });
-
-      console.log('[FlowPrompt SSO] User logged in:', uid);
-
-      res.redirect('/');
-    } catch (err) {
-      console.error('[FlowPrompt SSO] Error:', err);
-      res.status(401).send('SSO failed');
+function getKey(header, callback) {
+  client.getSigningKey(header.kid, (err, key) => {
+    if (err) {
+      return callback(err);
     }
+
+    const signingKey = key.getPublicKey();
+
+    callback(null, signingKey);
+  });
+}
+
+const FlowPromptSSO = {};
+
+FlowPromptSSO.init = async function (params) {
+  console.log('[FlowPrompt SSO] Plugin initialized');
+};
+
+FlowPromptSSO.addRoutes = async function ({ router, middleware }) {
+  router.get('/sso/jwt', middleware.buildHeader, FlowPromptSSO.handleJWT);
+  router.get(
+    '/sso/session-debug',
+    middleware.buildHeader,
+    FlowPromptSSO.debugSession,
+  );
+};
+
+FlowPromptSSO.handleJWT = async function (req, res) {
+  try {
+    const { token } = req.query;
+    const redirect = req.query.redirect || '/';
+
+    if (!token) {
+      return res.status(400).send('Missing token');
+    }
+
+    const decoded = await new Promise((resolve, reject) => {
+      jwt.verify(
+        token,
+        getKey,
+        {
+          audience: 'nodebb',
+          issuer: 'flowprompt',
+        },
+        (err, decoded) => {
+          if (err) return reject(err);
+
+          resolve(decoded);
+        },
+      );
+    });
+
+    const { uid: externalId, email, username, name, picture } = decoded;
+
+    if (!externalId) {
+      return res.status(400).send('Invalid token payload');
+    }
+
+    let uid = await db.getObjectField(`flowprompt:uid`, externalId);
+
+    if (!uid) {
+      console.log('[FlowPrompt SSO] Creating new user');
+
+      uid = await User.create({
+        username: username || name || `fp_${externalId}`,
+        email: email || undefined,
+        fullname: name || username || '',
+        picture: picture || null,
+      });
+
+      await db.setObjectField('flowprompt:uid', externalId, uid);
+
+      if (email) {
+        await User.setUserField(uid, 'email', email);
+        await User.setUserField(uid, 'email:confirmed', 1);
+      }
+    }
+
+    req.session.uid = uid;
+    await Sessions.save(req);
+
+    // Custom UID cookie for frontend validation
+    res.cookie('uid', uid, {
+      domain: '.flowprompt.ai',
+      path: '/',
+      secure: true,
+      sameSite: 'None',
+    });
+
+    console.log('[FlowPrompt SSO] Login successful for UID:', uid);
+
+    return res.redirect(redirect);
+  } catch (err) {
+    console.error('[FlowPrompt SSO] JWT error:', err.message);
+    return res.status(400).send(err.message);
+  }
+};
+
+FlowPromptSSO.debugSession = async function (req, res) {
+  const uid = req.session?.uid;
+
+  let user = null;
+
+  if (uid) {
+    user = await User.getUserFields(uid, [
+      'uid',
+      'username',
+      'email',
+      'email:confirmed',
+      'fullname',
+      'picture',
+    ]);
+  }
+
+  res.json({
+    sessionUid: uid || null,
+    reqUser: user,
+    cookies: req.cookies,
   });
 };
 
-/**
- * HEADER INJECTION (MINIMAL – NO SOCKET HACKING)
- */
-plugin.filterHeaderBuild = async function (data) {
-  data.scripts = data.scripts || [];
+FlowPromptSSO.modifySetCookieHeaders = function (req, res, next) {
+  const originalWriteHead = res.writeHead;
 
-  data.scripts.push({
-    src: '/plugins/nodebb-plugin-flowprompt-sso/client.js',
-    defer: true,
-  });
+  res.writeHead = function (statusCode, headers) {
+    let setCookie = headers?.['Set-Cookie'] || headers?.['set-cookie'];
 
-  return data;
+    if (Array.isArray(setCookie)) {
+      setCookie = setCookie
+        .filter((c) => !c.includes('SameSite=Lax'))
+        .map((c) =>
+          c.includes('express.sid')
+            ? c.replace(/SameSite=[^;]+/i, 'SameSite=None')
+            : c,
+        );
+
+      headers['Set-Cookie'] = setCookie;
+    }
+
+    return originalWriteHead.call(this, statusCode, headers);
+  };
+
+  next();
 };
 
-module.exports = plugin;
+module.exports = FlowPromptSSO;
