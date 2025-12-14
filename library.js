@@ -57,10 +57,13 @@ const Plugin = {
         // CRITICAL: Run immediately, before any other scripts
         // This intercepts NodeBB's session validation errors
         
+        console.log('[FlowPrompt SSO] Session fix script loaded');
+        
         function isUserLoggedIn() {
           try {
             const uid = parseInt(document.cookie.match(/uid=([^;]+)/)?.[1] || '0', 10);
-            return uid > 0;
+            const hasSession = document.cookie.includes('express.sid') || document.cookie.includes('connect.sid');
+            return uid > 0 || hasSession;
           } catch (e) {
             return false;
           }
@@ -68,14 +71,24 @@ const Plugin = {
         
         function shouldSuppressError(message) {
           if (typeof message !== 'string') return false;
+          const msg = message.toLowerCase();
           const errorMessages = [
             'login session no longer matches',
-            'connection to FlowPrompt.ai was lost',
+            'connection to flowprompt.ai was lost',
+            'connection to flowprompt was lost',
             'session no longer matches',
             'login session',
-            'was lost'
+            'was lost',
+            'please refresh',
+            'session expired',
+            'authentication failed'
           ];
-          return errorMessages.some(msg => message.toLowerCase().includes(msg.toLowerCase())) && isUserLoggedIn();
+          const matches = errorMessages.some(err => msg.includes(err));
+          const loggedIn = isUserLoggedIn();
+          if (matches && loggedIn) {
+            console.log('[FlowPrompt SSO] Detected session error message:', message);
+          }
+          return matches && loggedIn;
         }
         
         // Intercept window.alert IMMEDIATELY
@@ -92,7 +105,7 @@ const Plugin = {
         const originalConsoleError = console.error;
         console.error = function() {
           const args = Array.from(arguments);
-          const message = args.join(' ');
+          const message = args.map(arg => String(arg)).join(' ');
           if (shouldSuppressError(message)) {
             console.log('[FlowPrompt SSO] Suppressed console.error:', message);
             return;
@@ -100,8 +113,123 @@ const Plugin = {
           return originalConsoleError.apply(console, arguments);
         };
         
+        // Intercept socket.io at multiple levels
+        function interceptSocketIO() {
+          // Method 1: Intercept io() function itself
+          if (window.io && typeof window.io === 'function') {
+            const originalIO = window.io;
+            window.io = function() {
+              const socket = originalIO.apply(this, arguments);
+              wrapSocket(socket);
+              return socket;
+            };
+            // Copy properties
+            Object.keys(originalIO).forEach(key => {
+              window.io[key] = originalIO[key];
+            });
+          }
+          
+          // Method 2: Intercept existing socket instances
+          if (window.io && window.io.socket) {
+            wrapSocket(window.io.socket);
+          }
+          
+          // Method 3: Intercept app.socket if it exists
+          if (window.app && window.app.socket) {
+            wrapSocket(window.app.socket);
+          }
+          
+          // Method 4: Wait for socket to be created and intercept it
+          const checkForSocket = setInterval(function() {
+            if (window.io && window.io.socket && !window.io.socket._flowpromptWrapped) {
+              wrapSocket(window.io.socket);
+              clearInterval(checkForSocket);
+            }
+            if (window.app && window.app.socket && !window.app.socket._flowpromptWrapped) {
+              wrapSocket(window.app.socket);
+              clearInterval(checkForSocket);
+            }
+          }, 100);
+          
+          // Stop checking after 10 seconds
+          setTimeout(() => clearInterval(checkForSocket), 10000);
+        }
+        
+        function wrapSocket(socket) {
+          if (!socket || socket._flowpromptWrapped) return;
+          socket._flowpromptWrapped = true;
+          
+          console.log('[FlowPrompt SSO] Wrapping socket.io instance');
+          
+          // Intercept emit
+          if (typeof socket.emit === 'function') {
+            const originalEmit = socket.emit.bind(socket);
+            socket.emit = function() {
+              const args = Array.from(arguments);
+              const eventName = args[0];
+              
+              // Suppress session check if user is logged in
+              if ((eventName === 'user.checkSession' || eventName === 'user.validateSession') && isUserLoggedIn()) {
+                console.log('[FlowPrompt SSO] Suppressed socket.emit:', eventName);
+                return socket;
+              }
+              
+              return originalEmit.apply(this, arguments);
+            };
+          }
+          
+          // Intercept on/once/addEventListener
+          ['on', 'once', 'addEventListener'].forEach(method => {
+            if (typeof socket[method] === 'function') {
+              const originalMethod = socket[method].bind(socket);
+              socket[method] = function(event, handler) {
+                // Intercept session error events
+                if (typeof event === 'string' && typeof handler === 'function') {
+                  const errorEvents = [
+                    'event:user.statusChange',
+                    'event:session.required',
+                    'event:user.loggedOut',
+                    'event:session.invalid',
+                    'disconnect'
+                  ];
+                  
+                  if (errorEvents.includes(event) && isUserLoggedIn()) {
+                    console.log('[FlowPrompt SSO] Intercepting socket event listener:', event);
+                    return originalMethod.call(this, event, function(data) {
+                      console.log('[FlowPrompt SSO] Suppressed socket event:', event, data);
+                      // Don't call the original handler if user is logged in
+                      return;
+                    });
+                  }
+                }
+                
+                return originalMethod.apply(this, arguments);
+              };
+            }
+          });
+          
+          // Intercept socket connection/disconnection handlers
+          if (socket.io && socket.io.on) {
+            const originalIOOn = socket.io.on.bind(socket.io);
+            socket.io.on = function(event, handler) {
+              if (event === 'error' || event === 'disconnect') {
+                return originalIOOn.call(this, event, function(data) {
+                  if (isUserLoggedIn()) {
+                    console.log('[FlowPrompt SSO] Suppressed socket.io error/disconnect:', event);
+                    return;
+                  }
+                  return handler.apply(this, arguments);
+                });
+              }
+              return originalIOOn.apply(this, arguments);
+            };
+          }
+        }
+        
         // Wait for DOM and NodeBB to load, then intercept app.alert and other methods
         function initInterceptors() {
+          console.log('[FlowPrompt SSO] Initializing interceptors, user logged in:', isUserLoggedIn());
+          
           // Intercept app.alert
           if (window.app && typeof window.app.alert === 'function') {
             const originalAppAlert = window.app.alert;
@@ -114,33 +242,8 @@ const Plugin = {
             };
           }
           
-          // Intercept socket.io events that trigger session errors
-          if (window.io && window.io.socket) {
-            const socket = window.io.socket;
-            const originalEmit = socket.emit;
-            socket.emit = function() {
-              const args = Array.from(arguments);
-              // Don't emit session validation errors if user is logged in
-              if (args[0] === 'user.checkSession' && isUserLoggedIn()) {
-                console.log('[FlowPrompt SSO] Suppressed socket.emit(user.checkSession)');
-                return socket;
-              }
-              return originalEmit.apply(this, arguments);
-            };
-            
-            // Intercept socket.on for session error events
-            const originalOn = socket.on;
-            socket.on = function(event, handler) {
-              if ((event === 'event:user.statusChange' || event === 'event:session.required') && isUserLoggedIn()) {
-                return originalOn.call(this, event, function(data) {
-                  console.log('[FlowPrompt SSO] Suppressed socket event:', event);
-                  // Don't call handler if user is logged in
-                  return;
-                });
-              }
-              return originalOn.apply(this, arguments);
-            };
-          }
+          // Intercept socket.io
+          interceptSocketIO();
           
           // Intercept toastr
           if (window.toastr && typeof window.toastr.error === 'function') {
@@ -167,22 +270,115 @@ const Plugin = {
             };
           }
           
-          // Note: window.location.reload is read-only and cannot be overridden
-          // Instead, we prevent reloads by intercepting the socket events and error handlers
-          // that trigger them (see socket.emit and socket.on interceptors above)
+          // Intercept jQuery ajaxError if available (NodeBB might use this)
+          if (window.jQuery && window.jQuery(document)) {
+            window.jQuery(document).off('ajaxError.flowprompt-sso');
+            window.jQuery(document).on('ajaxError.flowprompt-sso', function(event, xhr, settings, error) {
+              if (xhr && xhr.responseText && shouldSuppressError(xhr.responseText)) {
+                console.log('[FlowPrompt SSO] Suppressed ajaxError:', error);
+                event.preventDefault();
+                event.stopPropagation();
+                return false;
+              }
+            });
+          }
+          
+          // Intercept fetch API for session validation calls
+          if (window.fetch) {
+            const originalFetch = window.fetch;
+            window.fetch = function() {
+              const args = Array.from(arguments);
+              const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+              
+              // Check if this is a session validation endpoint
+              if ((url.includes('/api/user/session') || url.includes('/api/user/status') || url.includes('checkSession')) && isUserLoggedIn()) {
+                console.log('[FlowPrompt SSO] Intercepting fetch for session check:', url);
+                // Return a successful response instead
+                return Promise.resolve(new Response(JSON.stringify({ status: 'ok', uid: parseInt(document.cookie.match(/uid=([^;]+)/)?.[1] || '0', 10) }), {
+                  status: 200,
+                  headers: { 'Content-Type': 'application/json' }
+                }));
+              }
+              
+              return originalFetch.apply(this, arguments).then(response => {
+                // Intercept response if it contains session error
+                if (response.ok) {
+                  return response.clone().text().then(text => {
+                    if (shouldSuppressError(text)) {
+                      console.log('[FlowPrompt SSO] Suppressed fetch response error:', text);
+                      return new Response(JSON.stringify({ status: 'ok' }), {
+                        status: 200,
+                        headers: { 'Content-Type': 'application/json' }
+                      });
+                    }
+                    return response;
+                  }).catch(() => response);
+                }
+                return response;
+              });
+            };
+          }
+          
+          // Intercept XMLHttpRequest for session validation
+          if (window.XMLHttpRequest) {
+            const originalXHROpen = XMLHttpRequest.prototype.open;
+            const originalXHRSend = XMLHttpRequest.prototype.send;
+            
+            XMLHttpRequest.prototype.open = function(method, url) {
+              this._flowpromptUrl = url;
+              return originalXHROpen.apply(this, arguments);
+            };
+            
+            XMLHttpRequest.prototype.send = function() {
+              const url = this._flowpromptUrl || '';
+              
+              // Intercept session validation requests
+              if ((url.includes('/api/user/session') || url.includes('/api/user/status') || url.includes('checkSession')) && isUserLoggedIn()) {
+                console.log('[FlowPrompt SSO] Intercepting XHR for session check:', url);
+                // Simulate successful response
+                Object.defineProperty(this, 'status', { value: 200, writable: false });
+                Object.defineProperty(this, 'statusText', { value: 'OK', writable: false });
+                Object.defineProperty(this, 'responseText', { value: JSON.stringify({ status: 'ok', uid: parseInt(document.cookie.match(/uid=([^;]+)/)?.[1] || '0', 10) }), writable: false });
+                Object.defineProperty(this, 'readyState', { value: 4, writable: false });
+                
+                if (this.onreadystatechange) {
+                  setTimeout(() => this.onreadystatechange(), 0);
+                }
+                return;
+              }
+              
+              // Intercept error responses
+              const originalOnReadyStateChange = this.onreadystatechange;
+              if (originalOnReadyStateChange) {
+                this.onreadystatechange = function() {
+                  if (this.readyState === 4 && this.responseText && shouldSuppressError(this.responseText)) {
+                    console.log('[FlowPrompt SSO] Suppressed XHR error response:', this.responseText);
+                    Object.defineProperty(this, 'status', { value: 200, writable: false });
+                    Object.defineProperty(this, 'responseText', { value: JSON.stringify({ status: 'ok' }), writable: false });
+                  }
+                  return originalOnReadyStateChange.apply(this, arguments);
+                };
+              }
+              
+              return originalXHRSend.apply(this, arguments);
+            };
+          }
         }
         
-        // Run interceptors immediately if DOM is ready, otherwise wait
+        // Run interceptors immediately
+        initInterceptors();
+        
+        // Also run after delays to catch late-loading NodeBB code
         if (document.readyState === 'loading') {
           document.addEventListener('DOMContentLoaded', initInterceptors);
-        } else {
-          initInterceptors();
         }
         
-        // Also run after a short delay to catch late-loading NodeBB code
+        setTimeout(initInterceptors, 50);
         setTimeout(initInterceptors, 100);
+        setTimeout(initInterceptors, 250);
         setTimeout(initInterceptors, 500);
         setTimeout(initInterceptors, 1000);
+        setTimeout(initInterceptors, 2000);
       })();`);
     });
 
