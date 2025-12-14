@@ -1,11 +1,9 @@
 const jwt = require('jsonwebtoken');
 const jwksClient = require('jwks-rsa');
-const crypto = require('crypto');
 
 const User = require.main.require('./src/user');
 const Meta = require.main.require('./src/meta');
 const db = require.main.require('./src/database');
-const nconf = require.main.require('nconf');
 
 const plugin = {};
 
@@ -53,6 +51,8 @@ plugin.init = async function ({ router, middleware }) {
         audience,
       });
 
+      console.log('[FlowPrompt SSO] Payload Email:', payload.email);
+
       if (!payload.email) {
         return res.status(400).send('Email missing in token');
       }
@@ -71,11 +71,20 @@ plugin.init = async function ({ router, middleware }) {
       // Find or create user
       let uid = await User.getUidByEmail(payload.email);
 
+      console.log('[FlowPrompt SSO] User ID:', uid);
+
       if (!uid) {
         uid = await User.create({
           username: payload.name || payload.email.split('@')[0],
           email: payload.email,
         });
+
+        console.log('[FlowPrompt SSO] User created:', uid);
+      }
+
+      if (payload.email) {
+        await User.setUserField(uid, 'email', payload.email);
+        await User.setUserField(uid, 'email:confirmed', 1);
       }
 
       // 🔐 LOG USER IN (NodeBB native)
