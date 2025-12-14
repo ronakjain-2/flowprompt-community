@@ -168,9 +168,60 @@ const Plugin = {
             });
           }
           
-          // Method 5: Check for socket in require.js modules (NodeBB uses AMD)
+          // Method 5: Intercept require.js to catch socket.io when it's loaded (NodeBB uses AMD)
           if (window.require && typeof window.require === 'function') {
             try {
+              const originalRequire = window.require;
+              
+              // Wrap require to intercept socket.io module loading
+              window.require = function() {
+                const result = originalRequire.apply(this, arguments);
+                
+                // Check if result is a socket-like object
+                if (result && typeof result === 'object') {
+                  if (typeof result.emit === 'function' && typeof result.on === 'function') {
+                    console.log('[FlowPrompt SSO] Found socket-like object from require, wrapping...');
+                    wrapSocket(result);
+                    socketFound = true;
+                  }
+                  
+                  // Also check if it has a socket property
+                  if (result.socket && typeof result.socket.emit === 'function') {
+                    console.log('[FlowPrompt SSO] Found socket property in require result, wrapping...');
+                    wrapSocket(result.socket);
+                    socketFound = true;
+                  }
+                }
+                
+                // Check if arguments include socket-related modules
+                const moduleIds = Array.isArray(arguments[0]) ? arguments[0] : [arguments[0]];
+                moduleIds.forEach(moduleId => {
+                  if (typeof moduleId === 'string' && (moduleId.includes('socket') || moduleId.includes('io'))) {
+                    console.log('[FlowPrompt SSO] Detected require for socket module:', moduleId);
+                    // The callback will receive the socket
+                    if (arguments[1] && typeof arguments[1] === 'function') {
+                      const originalCallback = arguments[1];
+                      arguments[1] = function() {
+                        const socket = arguments[0];
+                        if (socket && typeof socket.emit === 'function') {
+                          console.log('[FlowPrompt SSO] Wrapping socket from require callback');
+                          wrapSocket(socket);
+                          socketFound = true;
+                        }
+                        return originalCallback.apply(this, arguments);
+                      };
+                    }
+                  }
+                });
+                
+                return result;
+              };
+              
+              // Copy properties
+              Object.keys(originalRequire).forEach(key => {
+                window.require[key] = originalRequire[key];
+              });
+              
               // Try to get socket from require cache
               if (window.require.cache) {
                 Object.keys(window.require.cache).forEach(moduleId => {
@@ -188,7 +239,7 @@ const Plugin = {
                 });
               }
             } catch (e) {
-              // require.cache might not be accessible
+              console.log('[FlowPrompt SSO] Error intercepting require.js:', e);
             }
           }
           
@@ -436,32 +487,104 @@ const Plugin = {
           
           // Intercept any DOM mutations that might add error messages
           if (window.MutationObserver) {
+            const processedElements = new WeakSet();
+            
             const observer = new MutationObserver(function(mutations) {
               mutations.forEach(function(mutation) {
                 mutation.addedNodes.forEach(function(node) {
-                  if (node.nodeType === 1) { // Element node
-                    const text = node.textContent || node.innerText || '';
-                    if (shouldSuppressError(text)) {
-                      console.log('[FlowPrompt SSO] Detected error message in DOM:', text);
-                      // Try to remove or hide the error element
-                      if (node.style) {
-                        node.style.display = 'none';
+                  if (node.nodeType === 1 && !processedElements.has(node)) { // Element node
+                    processedElements.add(node);
+                    
+                    // Check the node itself and all its children
+                    const checkElement = function(el) {
+                      if (!el || processedElements.has(el)) return;
+                      processedElements.add(el);
+                      
+                      const text = (el.textContent || el.innerText || '').trim();
+                      if (text && shouldSuppressError(text)) {
+                        console.log('[FlowPrompt SSO] Removing error message from DOM:', text.substring(0, 100));
+                        
+                        // Try multiple methods to hide/remove
+                        try {
+                          el.style.display = 'none';
+                          el.style.visibility = 'hidden';
+                          el.style.opacity = '0';
+                          el.style.height = '0';
+                          el.style.width = '0';
+                          el.style.overflow = 'hidden';
+                          el.setAttribute('data-flowprompt-hidden', 'true');
+                          
+                          // Also hide parent if it's a container
+                          if (el.parentNode && el.parentNode.nodeType === 1) {
+                            const parent = el.parentNode;
+                            if (parent.classList && (parent.classList.contains('alert') || parent.classList.contains('error') || parent.classList.contains('warning'))) {
+                              parent.style.display = 'none';
+                              parent.setAttribute('data-flowprompt-hidden', 'true');
+                            }
+                          }
+                          
+                          // Remove from DOM after a short delay
+                          setTimeout(function() {
+                            try {
+                              if (el.parentNode) {
+                                el.parentNode.removeChild(el);
+                              }
+                            } catch (e) {
+                              // Element might already be removed
+                            }
+                          }, 100);
+                        } catch (e) {
+                          console.log('[FlowPrompt SSO] Error hiding element:', e);
+                        }
                       }
-                      if (node.parentNode && node.parentNode.style) {
-                        node.parentNode.style.display = 'none';
+                      
+                      // Check children
+                      if (el.children) {
+                        for (let i = 0; i < el.children.length; i++) {
+                          checkElement(el.children[i]);
+                        }
                       }
-                    }
+                    };
+                    
+                    checkElement(node);
                   }
                 });
               });
             });
             
-            observer.observe(document.body || document.documentElement, {
-              childList: true,
-              subtree: true
-            });
+            // Start observing when body is available
+            function startObserver() {
+              const target = document.body || document.documentElement;
+              if (target) {
+                observer.observe(target, {
+                  childList: true,
+                  subtree: true,
+                  characterData: true
+                });
+                console.log('[FlowPrompt SSO] DOM mutation observer started');
+              }
+            }
             
-            console.log('[FlowPrompt SSO] DOM mutation observer started');
+            if (document.body) {
+              startObserver();
+            } else {
+              document.addEventListener('DOMContentLoaded', startObserver);
+            }
+            
+            // Also check existing elements
+            setTimeout(function() {
+              if (document.body) {
+                const allElements = document.body.querySelectorAll('*');
+                allElements.forEach(function(el) {
+                  const text = (el.textContent || el.innerText || '').trim();
+                  if (text && shouldSuppressError(text)) {
+                    console.log('[FlowPrompt SSO] Found existing error message, removing:', text.substring(0, 100));
+                    el.style.display = 'none';
+                    el.setAttribute('data-flowprompt-hidden', 'true');
+                  }
+                });
+              }
+            }, 500);
           }
           
           // Intercept jQuery ajaxError if available (NodeBB might use this)
@@ -513,45 +636,47 @@ const Plugin = {
             };
           }
           
-          // Intercept XMLHttpRequest for session validation
+          // Intercept XMLHttpRequest ONLY for specific session validation endpoints
+          // Don't intercept all XHRs to avoid breaking socket.io and other functionality
           if (window.XMLHttpRequest) {
             const originalXHROpen = XMLHttpRequest.prototype.open;
-            const originalXHRSend = XMLHttpRequest.prototype.send;
             
             XMLHttpRequest.prototype.open = function(method, url) {
               this._flowpromptUrl = url;
+              this._flowpromptIsSessionCheck = false;
+              
+              // Only mark as session check for specific endpoints
+              if (typeof url === 'string' && isUserLoggedIn()) {
+                const sessionCheckPatterns = [
+                  '/api/user/session',
+                  '/api/user/status',
+                  'checkSession',
+                  '/api/session'
+                ];
+                this._flowpromptIsSessionCheck = sessionCheckPatterns.some(pattern => url.includes(pattern));
+              }
+              
               return originalXHROpen.apply(this, arguments);
             };
             
+            // Only intercept onreadystatechange for session check requests
+            const originalXHRSend = XMLHttpRequest.prototype.send;
             XMLHttpRequest.prototype.send = function() {
-              const url = this._flowpromptUrl || '';
-              
-              // Intercept session validation requests
-              if ((url.includes('/api/user/session') || url.includes('/api/user/status') || url.includes('checkSession')) && isUserLoggedIn()) {
-                console.log('[FlowPrompt SSO] Intercepting XHR for session check:', url);
-                // Simulate successful response
-                Object.defineProperty(this, 'status', { value: 200, writable: false });
-                Object.defineProperty(this, 'statusText', { value: 'OK', writable: false });
-                Object.defineProperty(this, 'responseText', { value: JSON.stringify({ status: 'ok', uid: parseInt(document.cookie.match(/uid=([^;]+)/)?.[1] || '0', 10) }), writable: false });
-                Object.defineProperty(this, 'readyState', { value: 4, writable: false });
-                
-                if (this.onreadystatechange) {
-                  setTimeout(() => this.onreadystatechange(), 0);
+              // Only wrap onreadystatechange for session checks
+              if (this._flowpromptIsSessionCheck && !this._flowpromptWrapped) {
+                this._flowpromptWrapped = true;
+                const originalOnReadyStateChange = this.onreadystatechange;
+                if (originalOnReadyStateChange) {
+                  this.onreadystatechange = function() {
+                    // Only intercept if it's a session check and contains error
+                    if (this.readyState === 4 && this.responseText && shouldSuppressError(this.responseText)) {
+                      console.log('[FlowPrompt SSO] Suppressed XHR session error response');
+                      // Don't modify the response, just prevent the error from propagating
+                      return;
+                    }
+                    return originalOnReadyStateChange.apply(this, arguments);
+                  };
                 }
-                return;
-              }
-              
-              // Intercept error responses
-              const originalOnReadyStateChange = this.onreadystatechange;
-              if (originalOnReadyStateChange) {
-                this.onreadystatechange = function() {
-                  if (this.readyState === 4 && this.responseText && shouldSuppressError(this.responseText)) {
-                    console.log('[FlowPrompt SSO] Suppressed XHR error response:', this.responseText);
-                    Object.defineProperty(this, 'status', { value: 200, writable: false });
-                    Object.defineProperty(this, 'responseText', { value: JSON.stringify({ status: 'ok' }), writable: false });
-                  }
-                  return originalOnReadyStateChange.apply(this, arguments);
-                };
               }
               
               return originalXHRSend.apply(this, arguments);
@@ -571,6 +696,42 @@ const Plugin = {
             }
           }
         };
+        
+        // Periodic cleanup of error messages
+        setInterval(function() {
+          if (!isUserLoggedIn()) return;
+          
+          // Find and remove all error elements
+          const errorSelectors = [
+            '.alert-danger',
+            '.alert-warning',
+            '.alert',
+            '[class*="error"]',
+            '[class*="warning"]',
+            '[id*="error"]',
+            '[id*="warning"]'
+          ];
+          
+          errorSelectors.forEach(function(selector) {
+            try {
+              const elements = document.querySelectorAll(selector);
+              elements.forEach(function(el) {
+                const text = (el.textContent || el.innerText || '').trim();
+                if (text && shouldSuppressError(text)) {
+                  console.log('[FlowPrompt SSO] Periodic cleanup: Removing error element');
+                  el.style.display = 'none';
+                  el.style.visibility = 'hidden';
+                  el.setAttribute('data-flowprompt-hidden', 'true');
+                  try {
+                    if (el.parentNode) {
+                      el.parentNode.removeChild(el);
+                    }
+                  } catch (e) {}
+                }
+              });
+            } catch (e) {}
+          });
+        }, 500); // Run every 500ms
         
         // Override common error display methods to log messages
         const logError = function(message, source) {
