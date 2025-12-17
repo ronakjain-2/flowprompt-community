@@ -1,0 +1,24 @@
+{
+  "id": "nodebb-plugin-flowprompt-bot",
+  "name": "FlowPrompt Support Bot",
+  "description": "Sends support topics/posts to FlowPrompt backend and posts automated replies",
+  "url": "https://flowprompt.ai",
+  "library": "./library.js",
+  "hooks": [
+    {
+      "hook": "filter:topic.create",
+      "method": "onTopicCreate",
+      "priority": 10
+    },
+    { "hook": "filter:post.save", "method": "onPostSave", "priority": 10 }
+  ],
+  "staticDirs": {},
+  "css": [],
+  "less": [],
+  "scripts": [],
+  "languages": [],
+  "acpScripts": [],
+  "nbbpm": {
+    "compatibility": "^4.0.0"
+  }
+}
