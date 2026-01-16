@@ -62,7 +62,9 @@ plugin.init = async function ({ router, middleware }) {
       const used = await db.get(nonceKey);
 
       if (used) {
-        return res.status(400).send('Nonce already used');
+        console.log('[FlowPrompt SSO] Nonce already used');
+        return res.redirect('https://community.flowprompt.ai');
+        // return res.status(400).send('Nonce already used');
       }
 
       await db.set(nonceKey, '1');
@@ -78,6 +80,7 @@ plugin.init = async function ({ router, middleware }) {
           username:
             payload.username || payload.email.split('@')[0] || payload.name,
           email: payload.email,
+          emailConfirmed: 1,
         });
 
         console.log('[FlowPrompt SSO] User created:', uid);
