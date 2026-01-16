@@ -15,11 +15,11 @@ async function getUidByEmailSafe(email) {
 
   let uid = await User.getUidByEmail(email);
 
-  console.log('[FlowPrompt SSO] UID:', uid);
+  console.log('[FlowPrompt SSO] UID (official):', uid);
 
   if (!uid) {
     uid = await db.getObjectField('email:uid', email);
-    console.log('[FlowPrompt SSO] UID from email:uid:', uid);
+    console.log('[FlowPrompt SSO] UID (email:uid):', uid);
   }
 
   return uid ? parseInt(uid, 10) : null;
@@ -103,10 +103,10 @@ plugin.init = async function ({ router, middleware }) {
       }
 
       if (payload.email) {
-        await User.confirmEmail(uid, payload.email);
         await User.setUserField(uid, 'email', payload.email);
         await User.setUserField(uid, 'email:confirmed', 1);
         await User.setUserField(uid, 'flowprompt:id', payload.userId);
+        await db.setObjectField('email:uid', payload.email, uid);
       }
 
       // 🔐 LOG USER IN (NodeBB native)
