@@ -67,8 +67,6 @@ plugin.init = async function ({ router, middleware }) {
         audience,
       });
 
-      console.log('[FlowPrompt SSO] Payload Email:', payload.email);
-
       if (!payload.email) {
         return res.status(400).send('Email missing in token');
       }
@@ -89,14 +87,11 @@ plugin.init = async function ({ router, middleware }) {
       // Find or create user
       let uid = await getUidByEmailSafe(payload.email);
 
-      console.log('[FlowPrompt SSO] User ID:', uid);
-
       if (!uid) {
         uid = await User.create({
           username:
             payload.username || payload.email.split('@')[0] || payload.name,
           email: payload.email,
-          emailConfirmed: 1,
         });
 
         console.log('[FlowPrompt SSO] User created:', uid);
