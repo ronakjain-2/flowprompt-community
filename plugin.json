@@ -4,6 +4,9 @@
   "description": "JWT based SSO for FlowPrompt",
   "url": "https://flowprompt.ai",
   "library": "./library.js",
+  "staticDirs": {
+    "public": "public"
+  },
   "hooks": [
     {
       "hook": "static:app.load",
