@@ -71,23 +71,24 @@ plugin.init = async function ({ router, middleware }) {
 
     const externalUrl = `${FLOWPROMPT_LOGIN}&mode=login`;
 
-    // Everyone else → FlowPrompt
-    console.log('[FlowPrompt SSO] Login POST Redirecting to:', externalUrl);
-
-    // If the request is AJAX (from NodeBB's login form)
+    // 2. Check if the request is AJAX (XHR)
     if (
       req.xhr ||
       (req.headers.accept && req.headers.accept.indexOf('json') > -1)
     ) {
       console.log(
-        '[FlowPrompt SSO] Login POST AJAX Redirecting to:',
-        externalUrl,
+        '[FlowPrompt SSO] AJAX request detected, sending external redirect signal',
       );
+
+      // This is the key: NodeBB client-side looks for the 'external' property
+      // in a 200 OK response to break out of the AJAX flow.
       return res.status(200).json({
         external: externalUrl,
       });
     }
 
+    // 3. Fallback for non-AJAX direct hits
+    console.log('[FlowPrompt SSO] Direct hit, redirecting normally');
     return res.redirect(externalUrl);
   });
 
