@@ -59,7 +59,9 @@ plugin.init = async function ({ router, middleware }) {
       `${FLOWPROMPT_LOGIN}?redirect=${redirect}`,
     );
 
-    return res.redirect(`${FLOWPROMPT_LOGIN}?redirect=${redirect}#login`);
+    return res.status(401).json({
+      redirect: `${FLOWPROMPT_LOGIN}?mode=login`,
+    });
   });
 
   router.post('/login', async (req, res) => {
@@ -80,7 +82,9 @@ plugin.init = async function ({ router, middleware }) {
       `${FLOWPROMPT_LOGIN}?redirect=${redirect}#login`,
     );
 
-    return res.redirect(`${FLOWPROMPT_LOGIN}?redirect=${redirect}#login`);
+    return res.status(401).json({
+      redirect: `${FLOWPROMPT_LOGIN}?mode=login`,
+    });
   });
 
   router.get('/register', (req, res) => {
@@ -94,7 +98,9 @@ plugin.init = async function ({ router, middleware }) {
       '[FlowPrompt SSO] Register Redirecting to:',
       `${FLOWPROMPT_LOGIN}?redirect=${redirect}`,
     );
-    return res.redirect(`${FLOWPROMPT_LOGIN}?redirect=${redirect}#register`);
+    return res.status(401).json({
+      redirect: `${FLOWPROMPT_LOGIN}?mode=register`,
+    });
   });
 
   router.post('/register', (req, res) => {
@@ -102,8 +108,8 @@ plugin.init = async function ({ router, middleware }) {
     console.log('[FlowPrompt SSO] UID:', req.uid);
     console.log('[FlowPrompt SSO] User:', req.user);
 
-    return res.status(403).json({
-      error: 'Registration is disabled. Please log in via FlowPrompt.',
+    return res.status(401).json({
+      redirect: `${FLOWPROMPT_LOGIN}?mode=register`,
     });
   });
 
