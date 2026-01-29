@@ -32,7 +32,6 @@ plugin.init = async function ({ router, middleware }) {
   console.log('[FlowPrompt SSO] Plugin initialized');
 
   const FLOWPROMPT_LOGIN = 'https://flowprompt.ai?forum=true';
-  const FORUM_URL = 'https://community.flowprompt.ai';
 
   const settings = await Meta.settings.get('flowprompt-sso');
 
@@ -52,16 +51,12 @@ plugin.init = async function ({ router, middleware }) {
       return res.render('login');
     }
 
-    const redirect = encodeURIComponent(FORUM_URL);
-
     console.log(
       '[FlowPrompt SSO] Redirecting to:',
-      `${FLOWPROMPT_LOGIN}?redirect=${redirect}`,
+      `${FLOWPROMPT_LOGIN}&mode=login`,
     );
 
-    return res.status(401).json({
-      redirect: `${FLOWPROMPT_LOGIN}&mode=login`,
-    });
+    return res.redirect(`${FLOWPROMPT_LOGIN}&mode=login`);
   });
 
   router.post('/login', async (req, res) => {
@@ -75,16 +70,12 @@ plugin.init = async function ({ router, middleware }) {
     }
 
     // Everyone else → FlowPrompt
-    const redirect = encodeURIComponent(FORUM_URL);
-
     console.log(
       '[FlowPrompt SSO] Login POST Redirecting to:',
-      `${FLOWPROMPT_LOGIN}?redirect=${redirect}#login`,
+      `${FLOWPROMPT_LOGIN}&mode=login`,
     );
 
-    return res.status(401).json({
-      redirect: `${FLOWPROMPT_LOGIN}&mode=login`,
-    });
+    return res.redirect(`${FLOWPROMPT_LOGIN}&mode=login`);
   });
 
   router.get('/register', (req, res) => {
@@ -92,15 +83,11 @@ plugin.init = async function ({ router, middleware }) {
     console.log('[FlowPrompt SSO] UID:', req.uid);
     console.log('[FlowPrompt SSO] User:', req.user);
 
-    const redirect = encodeURIComponent(FORUM_URL);
-
     console.log(
       '[FlowPrompt SSO] Register Redirecting to:',
-      `${FLOWPROMPT_LOGIN}?redirect=${redirect}`,
+      `${FLOWPROMPT_LOGIN}&mode=register`,
     );
-    return res.status(401).json({
-      redirect: `${FLOWPROMPT_LOGIN}&mode=register`,
-    });
+    return res.redirect(`${FLOWPROMPT_LOGIN}&mode=register`);
   });
 
   router.post('/register', (req, res) => {
@@ -108,9 +95,7 @@ plugin.init = async function ({ router, middleware }) {
     console.log('[FlowPrompt SSO] UID:', req.uid);
     console.log('[FlowPrompt SSO] User:', req.user);
 
-    return res.status(401).json({
-      redirect: `${FLOWPROMPT_LOGIN}&mode=register`,
-    });
+    return res.redirect(`${FLOWPROMPT_LOGIN}&mode=register`);
   });
 
   jwks = jwksClient({
