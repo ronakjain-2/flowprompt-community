@@ -31,7 +31,7 @@ async function getUidByEmailSafe(email) {
 plugin.init = async function ({ router, middleware }) {
   console.log('[FlowPrompt SSO] Plugin initialized');
 
-  const FLOWPROMPT_LOGIN = 'https://flowprompt.ai?forum=true';
+  const FLOWPROMPT_LOGIN = 'https://flowprompt.ai/?forum=true';
 
   const settings = await Meta.settings.get('flowprompt-sso');
 
