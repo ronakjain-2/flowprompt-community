@@ -69,13 +69,26 @@ plugin.init = async function ({ router, middleware }) {
       return res.redirect('/'); // let NodeBB handle admin session
     }
 
-    // Everyone else → FlowPrompt
-    console.log(
-      '[FlowPrompt SSO] Login POST Redirecting to:',
-      `${FLOWPROMPT_LOGIN}&mode=login`,
-    );
+    const externalUrl = `${FLOWPROMPT_LOGIN}&mode=login`;
 
-    return res.redirect(`${FLOWPROMPT_LOGIN}&mode=login`);
+    // Everyone else → FlowPrompt
+    console.log('[FlowPrompt SSO] Login POST Redirecting to:', externalUrl);
+
+    // If the request is AJAX (from NodeBB's login form)
+    if (
+      req.xhr ||
+      (req.headers.accept && req.headers.accept.indexOf('json') > -1)
+    ) {
+      console.log(
+        '[FlowPrompt SSO] Login POST AJAX Redirecting to:',
+        externalUrl,
+      );
+      return res.status(200).json({
+        external: externalUrl,
+      });
+    }
+
+    return res.redirect(externalUrl);
   });
 
   router.get('/register', (req, res) => {
