@@ -31,6 +31,9 @@ async function getUidByEmailSafe(email) {
 plugin.init = async function ({ router, middleware }) {
   console.log('[FlowPrompt SSO] Plugin initialized');
 
+  const FLOWPROMPT_LOGIN = 'https://flowprompt.ai?forum=true';
+  const FORUM_URL = 'https://community.flowprompt.ai';
+
   const settings = await Meta.settings.get('flowprompt-sso');
 
   const apiUrl = settings.apiUrl || 'https://api.flowprompt.ai';
@@ -38,6 +41,40 @@ plugin.init = async function ({ router, middleware }) {
   const audience = settings.audience || 'nodebb';
 
   console.log('[FlowPrompt SSO] FlowPrompt URL:', apiUrl);
+
+  router.get('/login', middleware.buildHeader, async (req, res) => {
+    console.log('[FlowPrompt SSO] Login requested');
+    console.log('[FlowPrompt SSO] UID:', req.uid);
+    console.log('[FlowPrompt SSO] User:', req.user);
+
+    if (req.uid && req.user?.isAdmin) {
+      // Admin allowed to see local login
+      return res.render('login');
+    }
+
+    const redirect = encodeURIComponent(FORUM_URL);
+
+    console.log(
+      '[FlowPrompt SSO] Redirecting to:',
+      `${FLOWPROMPT_LOGIN}?redirect=${redirect}`,
+    );
+
+    return res.redirect(`${FLOWPROMPT_LOGIN}?redirect=${redirect}#login`);
+  });
+
+  router.get('/register', (req, res) => {
+    console.log('[FlowPrompt SSO] Register requested');
+    console.log('[FlowPrompt SSO] UID:', req.uid);
+    console.log('[FlowPrompt SSO] User:', req.user);
+
+    const redirect = encodeURIComponent(FORUM_URL);
+
+    console.log(
+      '[FlowPrompt SSO] Register Redirecting to:',
+      `${FLOWPROMPT_LOGIN}?redirect=${redirect}`,
+    );
+    return res.redirect(`${FLOWPROMPT_LOGIN}?redirect=${redirect}#register`);
+  });
 
   jwks = jwksClient({
     jwksUri: `${apiUrl}/.well-known/jwks.json`,
@@ -67,6 +104,8 @@ plugin.init = async function ({ router, middleware }) {
         audience,
       });
 
+      console.log('[FlowPrompt SSO] Payload Email:', payload.email);
+
       if (!payload.email) {
         return res.status(400).send('Email missing in token');
       }
@@ -86,6 +125,8 @@ plugin.init = async function ({ router, middleware }) {
 
       // Find or create user
       let uid = await getUidByEmailSafe(payload.email);
+
+      console.log('[FlowPrompt SSO] User ID:', uid);
 
       if (!uid) {
         uid = await User.create({
