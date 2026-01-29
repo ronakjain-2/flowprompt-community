@@ -4,11 +4,14 @@
   "description": "JWT based SSO for FlowPrompt",
   "url": "https://flowprompt.ai",
   "library": "./library.js",
-  "scripts": ["static/client.js"],
   "hooks": [
     {
       "hook": "static:app.load",
       "method": "init"
+    },
+    {
+      "hook": "filter:header.build",
+      "method": "filterHeaderBuild"
     }
   ]
 }
