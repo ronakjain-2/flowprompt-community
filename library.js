@@ -60,7 +60,7 @@ plugin.init = async function ({ router, middleware }) {
     );
 
     return res.status(401).json({
-      redirect: `${FLOWPROMPT_LOGIN}?mode=login`,
+      redirect: `${FLOWPROMPT_LOGIN}&mode=login`,
     });
   });
 
@@ -83,7 +83,7 @@ plugin.init = async function ({ router, middleware }) {
     );
 
     return res.status(401).json({
-      redirect: `${FLOWPROMPT_LOGIN}?mode=login`,
+      redirect: `${FLOWPROMPT_LOGIN}&mode=login`,
     });
   });
 
@@ -99,7 +99,7 @@ plugin.init = async function ({ router, middleware }) {
       `${FLOWPROMPT_LOGIN}?redirect=${redirect}`,
     );
     return res.status(401).json({
-      redirect: `${FLOWPROMPT_LOGIN}?mode=register`,
+      redirect: `${FLOWPROMPT_LOGIN}&mode=register`,
     });
   });
 
@@ -109,7 +109,7 @@ plugin.init = async function ({ router, middleware }) {
     console.log('[FlowPrompt SSO] User:', req.user);
 
     return res.status(401).json({
-      redirect: `${FLOWPROMPT_LOGIN}?mode=register`,
+      redirect: `${FLOWPROMPT_LOGIN}&mode=register`,
     });
   });
 
