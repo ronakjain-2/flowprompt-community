@@ -212,20 +212,14 @@ plugin.init = async function ({ router, middleware }) {
 /**
  * HEADER INJECTION (MINIMAL – NO SOCKET HACKING)
  */
-plugin.filterHeaderBuild = async function (data) {
-  console.log('[FlowPrompt SSO] Filtering header build');
-  console.log('[FlowPrompt SSO] Data:', data);
+plugin.addClientScript = async function (scripts) {
+  console.log('[FlowPrompt SSO] filter:scripts.get called');
 
-  data.scripts = data.scripts || [];
-
-  data.scripts.push({
-    src: '/plugins/nodebb-plugin-flowprompt-sso/static/client.js',
-    defer: true,
+  scripts.push({
+    src: '/plugins/nodebb-plugin-flowprompt-sso/client.js',
   });
 
-  console.log('[FlowPrompt SSO] Scripts:', data.scripts);
-
-  return data;
+  return scripts;
 };
 
 module.exports = plugin;
