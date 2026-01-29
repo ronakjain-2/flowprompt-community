@@ -214,9 +214,7 @@ plugin.init = async function ({ router, middleware }) {
 plugin.addClientScript = async function (scripts) {
   console.log('[FlowPrompt SSO] filter:scripts.get called');
 
-  scripts.push({
-    src: '/plugins/nodebb-plugin-flowprompt-sso/client.js',
-  });
+  scripts.push('/plugins/nodebb-plugin-flowprompt-sso/client.js');
 
   return scripts;
 };
