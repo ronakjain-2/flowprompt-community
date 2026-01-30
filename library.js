@@ -41,14 +41,14 @@ plugin.init = async function ({ router, middleware }) {
 
   console.log('[FlowPrompt SSO] FlowPrompt URL:', apiUrl);
 
-  router.get('/login', async (req, res) => {
+  router.get('/login', async (req, res, next) => {
     console.log('[FlowPrompt SSO] Login requested');
     console.log('[FlowPrompt SSO] UID:', req.uid);
     console.log('[FlowPrompt SSO] User:', req.user);
 
     if ((req.uid && req.user?.isAdmin) || req.uid === 1) {
       // Admin allowed to see local login
-      return res.redirect('https://community.flowprompt.ai/login');
+      return next();
     }
 
     console.log(
@@ -59,14 +59,14 @@ plugin.init = async function ({ router, middleware }) {
     return res.redirect(`${FLOWPROMPT_LOGIN}&mode=login`);
   });
 
-  router.post('/login', async (req, res) => {
+  router.post('/login', async (req, res, next) => {
     console.log('[FlowPrompt SSO] Login POST requested');
     console.log('[FlowPrompt SSO] UID:', req.uid);
     console.log('[FlowPrompt SSO] User:', req.user);
 
     // Allow admin password login ONLY
     if ((req.uid && req.user?.isAdmin) || req.uid === 1) {
-      return res.redirect('https://community.flowprompt.ai/login'); // let NodeBB handle admin session
+      return next(); // let NodeBB handle admin session
     }
 
     const externalUrl = `${FLOWPROMPT_LOGIN}&mode=login`;
