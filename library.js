@@ -46,7 +46,7 @@ plugin.init = async function ({ router, middleware }) {
     console.log('[FlowPrompt SSO] UID:', req.uid);
     console.log('[FlowPrompt SSO] User:', req.user);
 
-    if (req.uid && req.user?.isAdmin) {
+    if ((req.uid && req.user?.isAdmin) || req.uid === 1) {
       // Admin allowed to see local login
       return res.render('login');
     }
@@ -65,7 +65,7 @@ plugin.init = async function ({ router, middleware }) {
     console.log('[FlowPrompt SSO] User:', req.user);
 
     // Allow admin password login ONLY
-    if (req.uid && req.user?.isAdmin) {
+    if ((req.uid && req.user?.isAdmin) || req.uid === 1) {
       return res.redirect('/'); // let NodeBB handle admin session
     }
 
