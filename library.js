@@ -82,9 +82,10 @@ plugin.init = async function ({ router, middleware }) {
 
       // This is the key: NodeBB client-side looks for the 'external' property
       // in a 200 OK response to break out of the AJAX flow.
-      return res.status(401).json({
-        redirect: externalUrl,
-      });
+      return res.redirect(externalUrl);
+      // return res.status(401).json({
+      //   redirect: externalUrl,
+      // });
     }
 
     // 3. Fallback for non-AJAX direct hits
