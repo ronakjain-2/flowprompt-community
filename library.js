@@ -42,9 +42,11 @@ plugin.init = async function ({ router, middleware }) {
   console.log('[FlowPrompt SSO] FlowPrompt URL:', apiUrl);
 
   router.get('/login', async (req, res, next) => {
-    console.log('[FlowPrompt SSO] Login requested');
-    console.log('[FlowPrompt SSO] UID:', req.uid);
-    console.log('[FlowPrompt SSO] User:', req.user);
+    console.log(
+      '[FlowPrompt SSO] Login requested, UID and User:',
+      req.uid,
+      req.user,
+    );
 
     if ((req.uid && req.user?.isAdmin) || req.uid === 1) {
       // Admin allowed to see local login
@@ -60,9 +62,11 @@ plugin.init = async function ({ router, middleware }) {
   });
 
   router.post('/login', async (req, res, next) => {
-    console.log('[FlowPrompt SSO] Login POST requested');
-    console.log('[FlowPrompt SSO] UID:', req.uid);
-    console.log('[FlowPrompt SSO] User:', req.user);
+    console.log(
+      '[FlowPrompt SSO] Login POST requested, UID and User:',
+      req.uid,
+      req.user,
+    );
 
     // Allow admin password login ONLY
     if ((req.uid && req.user?.isAdmin) || req.uid === 1) {
@@ -93,10 +97,8 @@ plugin.init = async function ({ router, middleware }) {
   });
 
   router.get('/undefined', async (req, res) => {
-    console.log('[FlowPrompt SSO] Undefined requested');
-
     console.log(
-      '[FlowPrompt SSO] Redirecting to:',
+      '[FlowPrompt SSO] Undefined requested, Redirecting to:',
       `${FLOWPROMPT_LOGIN}&mode=login`,
     );
 
@@ -104,21 +106,20 @@ plugin.init = async function ({ router, middleware }) {
   });
 
   router.get('/register', (req, res) => {
-    console.log('[FlowPrompt SSO] Register requested');
-    console.log('[FlowPrompt SSO] UID:', req.uid);
-    console.log('[FlowPrompt SSO] User:', req.user);
-
     console.log(
-      '[FlowPrompt SSO] Register Redirecting to:',
-      `${FLOWPROMPT_LOGIN}&mode=register`,
+      '[FlowPrompt SSO] Register requested and redirecting, UID and User:',
+      req.uid,
+      req.user,
     );
     return res.redirect(`${FLOWPROMPT_LOGIN}&mode=register`);
   });
 
   router.post('/register', (req, res) => {
-    console.log('[FlowPrompt SSO] Register POST requested');
-    console.log('[FlowPrompt SSO] UID:', req.uid);
-    console.log('[FlowPrompt SSO] User:', req.user);
+    console.log(
+      '[FlowPrompt SSO] Register POST requested, and redirecting, UID and User:',
+      req.uid,
+      req.user,
+    );
 
     return res.redirect(`${FLOWPROMPT_LOGIN}&mode=register`);
   });
