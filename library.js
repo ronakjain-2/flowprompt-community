@@ -92,6 +92,17 @@ plugin.init = async function ({ router, middleware }) {
     return res.redirect(externalUrl);
   });
 
+  router.get('/undefined', async (req, res) => {
+    console.log('[FlowPrompt SSO] Undefined requested');
+
+    console.log(
+      '[FlowPrompt SSO] Redirecting to:',
+      `${FLOWPROMPT_LOGIN}&mode=login`,
+    );
+
+    return res.redirect(`${FLOWPROMPT_LOGIN}&mode=login`);
+  });
+
   router.get('/register', (req, res) => {
     console.log('[FlowPrompt SSO] Register requested');
     console.log('[FlowPrompt SSO] UID:', req.uid);
